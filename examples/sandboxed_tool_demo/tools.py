@@ -20,19 +20,23 @@ from temporal_agent_harness.harness.sandbox import SandboxConfig
 # Daytona cloud sandbox. Swap in remote.E2B(...) or remote.Subprocess() to run the exact same
 # tool under a different backend, with zero changes to `run_bash` below.
 #
-# local_project_root is the REPO ROOT, not this directory: `run_bash` is re-imported inside the
-# sandbox by its full dotted path (`examples.sandboxed_tool_demo.tools`), which resolves only
-# with the repo root (where the `examples` namespace package starts) on the path.
+# local_project_root is THIS directory (the example dir), not the repo root. It does NOT determine
+# how the tool is imported inside the sandbox: remote-box re-imports `run_bash` by its real
+# __module__ (`examples.sandboxed_tool_demo.tools`; see remote/decorator.py's __get_import_path),
+# which the Dockerfile satisfies by COPYing tools.py to /app/examples/sandboxed_tool_demo/ with
+# /app on sys.path. local_project_root only (a) names/hashes the snapshot — scoping it to this dir
+# means edits elsewhere in the repo don't invalidate the prebuilt image — and (b) is passed to
+# remote-box, which for Daytona never uploads it (the code is baked into the snapshot by the
+# Dockerfile, not shipped at runtime).
 #
-# dockerfile_path points at the REPO ROOT, not this directory — see Dockerfile.sandboxed-tool-demo
-# there for why: remote-box's Daytona backend resolves every Dockerfile COPY source relative to
-# the Dockerfile's OWN directory (a daytona_sdk quirk, confirmed by reading
-# Image.from_dockerfile's source — local_project_root plays no part in that resolution), so the
-# Dockerfile must itself live at local_project_root for `COPY pyproject.toml uv.lock ./`/
-# `COPY temporal_agent_harness/ ...` to find anything. That same Dockerfile also lists every COPY
-# source EXPLICITLY rather than `COPY . .` — Daytona's SDK builds its own upload list by parsing
-# the Dockerfile's own COPY lines client-side, so `.dockerignore` is never consulted at all; a
-# bare `COPY . .` would upload `.venv`, `.git`, and `.env.local` (which holds real API keys).
+# dockerfile_path is relative to local_project_root, so it points at THIS dir's Dockerfile. Keeping
+# the Dockerfile here (not the repo root) is deliberate: this example's code must not leak into the
+# rest of the repo. It works because the image installs the harness from GitHub (see pyproject.toml)
+# instead of COPYing the repo's source — so the build context is scoped to this dir and every COPY
+# source resolves within it. Daytona's SDK resolves each COPY source relative to the Dockerfile's
+# OWN directory and builds its own upload list by parsing the COPY lines client-side (no real
+# `docker build`, so `.dockerignore` is never consulted for the upload) — the Dockerfile here lists
+# only the bare filenames that live beside it.
 #
 # Needs DAYTONA_API_KEY set (in .env.local) and the snapshot built ahead of time — never at
 # runtime (SandboxConfig.require_prebuilt defaults to True) — via:
@@ -43,7 +47,7 @@ SANDBOX = SandboxConfig(
         snapshot_name="sandboxed-tool-demo",
         dockerfile_path="Dockerfile.sandboxed-tool-demo",
     ),
-    local_project_root=Path(__file__).parent.parent.parent,
+    local_project_root=Path(__file__).parent,
 )
 
 

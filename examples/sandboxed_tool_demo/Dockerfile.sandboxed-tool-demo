@@ -1,0 +1,35 @@
+# Daytona snapshot image for examples/sandboxed_tool_demo (see tools.py's SANDBOX). It lives in the
+# example dir, with a build context scoped to this dir, so the example stays self-contained — nothing
+# from the rest of the repo leaks in. The point it demonstrates: a sandboxed tool's dependencies are
+# its OWN, independent of the agent worker's — this snapshot installs only what run_bash needs (the
+# harness, from GitHub, per pyproject.toml), not the worker's full stack.
+#
+# Build offline/CI only, never at runtime (SandboxConfig.require_prebuilt): `just build-sandbox`.
+
+FROM ghcr.io/astral-sh/uv:python3.12-trixie-slim
+
+WORKDIR /app
+
+# The uv base image has no git, and uv shells out to `git` to fetch the harness dep below (without
+# this, `uv sync` fails with "Git executable not found").
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+
+# Install the one dependency (the harness + `sandbox` extra, from GitHub) into /app/.venv. No uv.lock
+# is committed — this is only ever built in the snapshot, so uv resolves fresh here; `package = false`
+# (pyproject.toml) makes uv install only that dep, not this example as a package.
+COPY pyproject.toml ./
+RUN uv sync --no-install-project
+
+# remote-box re-imports the tool inside the sandbox by its real dotted path, and the harness wheel
+# doesn't ship examples/ — so place tools.py here, with /app (WORKDIR, hence on sys.path) as its root,
+# so `from examples.sandboxed_tool_demo.tools import run_bash` resolves.
+COPY __init__.py tools.py ./examples/sandboxed_tool_demo/
+
+# Live-preview support (see preview_proxy.py): supervise.sh is the ENTRYPOINT — a keepalive that
+# (re)launches /home/daytona/start.sh on every boot, so the server comes back when the proxy wakes a
+# stopped sandbox. Daytona's toolbox daemon runs independently, so run_bash + preview links still
+# work. /home/daytona is world-writable (run_bash writes start.sh there) and on persistent disk.
+COPY supervise.sh /usr/local/bin/supervise.sh
+RUN chmod +x /usr/local/bin/supervise.sh && mkdir -p /home/daytona && chmod 777 /home/daytona
+
+ENTRYPOINT ["/usr/local/bin/supervise.sh"]

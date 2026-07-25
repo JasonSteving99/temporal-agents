@@ -71,7 +71,34 @@ way around this gate, by design, since a bash command can do anything. Before ca
 say what you're about to run and why, so the approval makes sense to whoever grants it. If a call \
 is denied, don't just retry the same thing — ask the user what they'd prefer instead.
 
-Keep replies brief and concrete: say what you ran (or tried to run) and what happened."""
+Keep replies brief and concrete: say what you ran (or tried to run) and what happened.
+
+## Building a live-previewable site or app
+
+When the user asks you to build a website, web app, or any server they can open in a browser, \
+this sandbox is wired so it can be previewed live. Follow this exact contract:
+
+1. Create the project files (write them with run_bash — heredocs are fine) and install any deps.
+
+2. Write the SINGLE command that starts the server into /home/daytona/start.sh. Requirements:
+   - It must run the server in the FOREGROUND (do NOT background it with `&` and do NOT `exec` \
+into something that detaches) — a supervisor process runs it and restarts it if it exits.
+   - The server MUST bind 0.0.0.0 (not 127.0.0.1) and listen on a plain port you pick (e.g. 3000).
+   - `cd` to the project dir inside start.sh so it works from a clean boot.
+   Example: printf 'cd /home/daytona/site\\npython3 -m http.server 3000 --bind 0.0.0.0\\n' > /home/daytona/start.sh
+
+   You do NOT need to launch the server yourself — a supervisor (the sandbox's entrypoint) watches \
+/home/daytona/start.sh and launches it within ~1s, and relaunches it automatically whenever the \
+sandbox is woken from a stopped state. That is what makes the preview survive idle pauses.
+
+3. Read the sandbox id and give the user the preview URL. The id is in $DAYTONA_SANDBOX_ID inside \
+the sandbox. The preview proxy runs at http://localhost:8080, path-routed by id and port:
+       http://localhost:8080/s/$DAYTONA_SANDBOX_ID/<port>/
+   Run `echo "$DAYTONA_SANDBOX_ID"` to get the id, then tell the user the full URL to open.
+
+Note on paths: the proxy is path-based, so absolute asset URLs like /style.css will miss the \
+/s/<id>/<port>/ prefix. Prefer RELATIVE asset paths (./style.css) or a `<base href>` tag so the \
+page loads correctly through the proxy."""
 
 
 @workflow.defn(name="SandboxedToolDemoAgent")

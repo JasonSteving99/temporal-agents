@@ -75,9 +75,17 @@ worker:
     cd "{{ root }}" && uv run --extra sandbox --group examples python -m examples.sandboxed_tool_demo.worker
 
 # Build (or verify) the Daytona snapshot image tools.py's SANDBOX runs on — the offline/CI step.
-# Run this once before `just worker`/`just demo`, and again whenever tools.py, the repo-root
-# Dockerfile.sandboxed-tool-demo, or the project itself changes. Needs DAYTONA_API_KEY set in the
-
-# repo-root .env.local.
+# Run this once before `just worker`/`just demo`, and again whenever tools.py, this example's
+# Dockerfile.sandboxed-tool-demo, or its scoped pyproject.toml changes. Needs DAYTONA_API_KEY set in
+# the repo-root .env.local.
 build-sandbox:
     cd "{{ root }}" && uv run --extra sandbox python -c "from temporal_agent_harness.harness.sandbox import build_sandbox; from examples.sandboxed_tool_demo.tools import SANDBOX; print(build_sandbox(SANDBOX))"
+
+# Run the live-preview proxy (examples/sandboxed_tool_demo/preview_proxy.py) on :8080. Wakes a
+# stopped sandbox on demand and forwards to a server the agent launched inside it, path-routed as
+# http://localhost:8080/s/<sandboxId>/<port>/. Standalone — touches nothing in the harness web app.
+# aiohttp is injected with uv (`--with`) so it stays isolated to this example; `daytona` comes from
+# the `sandbox` extra. Needs DAYTONA_API_KEY (and optionally DAYTONA_TARGET) in the repo-root
+# .env.local. Requires the snapshot built with the preview entrypoint (`just build-sandbox`).
+preview-proxy:
+    cd "{{ root }}" && uv run --extra sandbox --with aiohttp python -m examples.sandboxed_tool_demo.preview_proxy
