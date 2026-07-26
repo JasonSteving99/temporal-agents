@@ -1,0 +1,16 @@
+# Keep the build context lean — only pyproject.toml, uv.lock, and examples/ are COPY'd.
+.git
+.github
+.gitignore
+deploy
+**/__pycache__
+*.py[oc]
+.venv
+.pytest_cache
+*.md
+LICENSE
+.env
+.env.local
+temporal.toml
+.DS_Store
+.claude

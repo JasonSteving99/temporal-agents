@@ -82,9 +82,15 @@ app) that lets you open a server the agent started inside the sandbox:
    `/home/daytona/project/start.sh` (inside the project dir, so the agent's `write` tool can create
    it) and (re)launches it on every boot — so a woken sandbox re-serves automatically.
 2. **The agent** writes the foreground, `0.0.0.0`-bound launch command to `start.sh`, then reads
-   `$DAYTONA_SANDBOX_ID` and hands you `http://localhost:8080/s/<sandboxId>/<port>/`.
-3. **The proxy** wakes a stopped sandbox on request, fetches a fresh preview token, waits for the
-   server to bind, then forwards HTTP + WebSocket/HMR traffic.
+   `$DAYTONA_SANDBOX_ID` and hands you `https://<sandboxId>-<port>.<PREVIEW_BASE_DOMAIN>/`.
+3. **The proxy** routes by **subdomain**: it parses `<sandboxId>-<port>` from the Host header, wakes a
+   stopped sandbox on request, fetches a fresh preview token, waits for the server to bind, then
+   forwards HTTP + WebSocket/HMR traffic with the request path untouched.
+
+Routing by subdomain (not a `/s/<id>/<port>/` path prefix) is what lets a previewed site behave like
+a normal site — it's served at the root of its own subdomain, so absolute asset paths work. Deploying
+it needs a wildcard DNS record + a reverse proxy for wildcard TLS; see
+[`deploy/README.md`](../../../deploy/README.md).
 
 ### Cost: idle sandboxes stop themselves
 
@@ -99,6 +105,7 @@ preview stops itself and re-wakes on the next request.
 - **Lifetime is tied to the chat session.** The harness stops the sandbox between turns (a container
   sandbox's pause is stop — disk persists, processes are killed; the supervisor relaunches the server
   on wake) and deletes it when the workflow ends. Once you close the session, the preview 404s.
-- **Path-based routing.** Absolute asset URLs (`/style.css`) miss the `/s/<id>/<port>/` prefix — the
-  agent is prompted to use relative paths or a `<base href>`.
+- **Subdomain routing needs infra.** Previews require a wildcard DNS record and a reverse proxy that
+  terminates wildcard TLS and preserves the Host header (see `deploy/README.md`). Set
+  `PREVIEW_BASE_DOMAIN` to enable them; leave it unset and the agent simply won't offer previews.
 - **No auth** on the proxy — add your own gate before exposing it anywhere.

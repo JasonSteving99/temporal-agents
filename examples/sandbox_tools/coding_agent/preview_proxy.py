@@ -1,5 +1,5 @@
 """
-Daytona custom preview proxy for the sandboxed coding agent — path-based routing.
+Daytona custom preview proxy for the sandboxed coding agent — SUBDOMAIN routing.
 
 Purpose: sit in front of Daytona's preview endpoint so a stopped CONTAINER
 sandbox is woken on demand and the server (relaunched by the snapshot's
@@ -8,24 +8,30 @@ start-and-wait gate is what makes a stopped-then-woken sandbox serve traffic
 seamlessly, so you can build a web app inside the sandbox via the chat agent and
 preview it live.
 
+Routing is by SUBDOMAIN (parsed from the Host header), not by path:
+
+    https://<sandboxId>-<port>.<PREVIEW_BASE_DOMAIN>/<path...>?<query>
+
+e.g. https://abc123-3000.preview.example.com/assets/app.js . The leftmost DNS
+label encodes the target: `<sandboxId>-<port>` (split on the LAST hyphen, since
+Daytona ids may contain hyphens and the port is always the trailing number).
+The request path is forwarded UNCHANGED to the sandbox, so a site that
+references absolute roots (`/assets/app.js`, `/style.css`) works exactly as it
+would when served normally — no `<base href>`, no relative-path gymnastics, no
+prefix rewriting. That's the whole reason for subdomain routing.
+
+Deployment (see deploy/README.md): point a WILDCARD DNS record
+`*.<PREVIEW_BASE_DOMAIN>` at the host, and run a reverse proxy (Caddy/Traefik/
+nginx) that terminates wildcard TLS and forwards to this proxy PRESERVING the
+Host header. This proxy itself speaks plain HTTP and only reads Host.
+
 This is deliberately SELF-CONTAINED to the example: it is its own aiohttp server
 and touches nothing in `temporal_agent_harness.web`. It is a teaching skeleton,
 not production code — start from the official samples for anything real:
 https://github.com/daytonaio/daytona-proxy-samples
 
-Routing is PATH-based (no wildcard DNS, no real domain needed), so it runs as-is
-on plain localhost:
-
-    http://localhost:8080/s/<sandboxId>/<port>/<path...>?<query>
-
-The `<sandboxId>` is the value of $DAYTONA_SANDBOX_ID inside the sandbox — the
-chat agent reads it (`echo "$DAYTONA_SANDBOX_ID"`) and hands you the URL. The
-tradeoff of path routing: apps that reference absolute root paths (e.g.
-`/assets/app.js`) will miss the `/s/<id>/<port>/` prefix. For the demo, prefer
-relative asset paths or a `<base href>`; a production proxy would rewrite them.
-
-Deps:  run via the justfile (`just preview-proxy`), which injects aiohttp with uv.
-Env:   DAYTONA_API_KEY (required); DAYTONA_TARGET (optional region, e.g. "us");
+Env:   DAYTONA_API_KEY (required); PREVIEW_BASE_DOMAIN (required, e.g.
+       "preview.example.com"); DAYTONA_TARGET (optional region, e.g. "us");
        PREVIEW_PROXY_PORT (optional, default 8080).
 """
 
@@ -51,6 +57,11 @@ def _make_daytona() -> AsyncDaytona:
 
 daytona = _make_daytona()
 
+# The base domain preview subdomains hang off of, e.g. "preview.example.com". A request to
+# "<sandboxId>-<port>.<this>" is routed to that sandbox's port. Required — with it unset every
+# request just gets the help page (there's nothing to parse a sandbox out of).
+PREVIEW_BASE_DOMAIN = os.environ.get("PREVIEW_BASE_DOMAIN", "").strip().lower()
+
 # Headers that must not be blindly copied through a proxy.
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -73,6 +84,34 @@ AUTO_STOP_MINUTES = int(os.environ.get("PREVIEW_AUTO_STOP_MINUTES", "3"))
 # would add a needless API round-trip. A restarted proxy just re-applies on the
 # first request it sees for each sandbox.
 _autostop_configured: set[str] = set()
+
+
+# ---------------------------------------------------------------------------
+# 0. Host parsing: pull (sandbox_id, port) out of the Host header. Returns None
+#    for anything that isn't a "<sandboxId>-<port>.<PREVIEW_BASE_DOMAIN>" host
+#    (the bare base domain, an IP, a stray Host) — those get the help page.
+# ---------------------------------------------------------------------------
+def parse_preview_host(host_header: str) -> "tuple[str, int] | None":
+    if not PREVIEW_BASE_DOMAIN or not host_header:
+        return None
+    host = host_header.strip().lower()
+    # Drop an optional ":port" (present when hit directly rather than via a 443 reverse proxy).
+    # Preview hosts are never IPv6 literals, so a bracket means "not one of ours".
+    if host.startswith("["):
+        return None
+    if ":" in host:
+        host = host.rsplit(":", 1)[0]
+    suffix = "." + PREVIEW_BASE_DOMAIN
+    if not host.endswith(suffix):
+        return None
+    label = host[: -len(suffix)]
+    # Must be a single DNS label so a one-level wildcard cert (*.<base>) covers it.
+    if not label or "." in label:
+        return None
+    sandbox_id, sep, port_str = label.rpartition("-")
+    if not sep or not sandbox_id or not port_str.isdigit():
+        return None
+    return sandbox_id, int(port_str)
 
 
 # ---------------------------------------------------------------------------
@@ -130,13 +169,12 @@ async def ensure_ready(sandbox_id: str, port: int, session: ClientSession):
 
 
 # ---------------------------------------------------------------------------
-# 3. Routing: /s/<sandboxId>/<port>/<tail...>. The aiohttp route captures the
-#    three parts for us; this just validates the port and rebuilds the upstream
-#    path from <tail> (everything after the prefix).
+# 3. Rebuild the upstream URL. The path is forwarded UNCHANGED (subdomain
+#    routing means there's no prefix to strip) so absolute asset paths just work.
 # ---------------------------------------------------------------------------
-def upstream_url(preview_url: str, tail: str, query: "URL") -> URL:
+def upstream_url(preview_url: str, path: str, query: "URL") -> URL:
     base = URL(preview_url)
-    return (base.origin() / tail.lstrip("/")).with_query(query)
+    return (base.origin() / path.lstrip("/")).with_query(query)
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +182,7 @@ def upstream_url(preview_url: str, tail: str, query: "URL") -> URL:
 #    and skips its warning page; we just bridge client <-> upstream and carry
 #    the token + forwarded host.
 # ---------------------------------------------------------------------------
-async def proxy_ws(request, sandbox_id, port, tail, session):
+async def proxy_ws(request, sandbox_id, port, path, session):
     try:
         preview = await ensure_ready(sandbox_id, port, session)
     except Exception:
@@ -153,7 +191,7 @@ async def proxy_ws(request, sandbox_id, port, tail, session):
     client_ws = web.WebSocketResponse()
     await client_ws.prepare(request)
 
-    up_url = upstream_url(preview.url, tail, request.rel_url.query)
+    up_url = upstream_url(preview.url, path, request.rel_url.query)
     up_url = up_url.with_scheme("wss" if up_url.scheme == "https" else "ws")
 
     async with session.ws_connect(
@@ -184,20 +222,25 @@ async def proxy_ws(request, sandbox_id, port, tail, session):
 
 
 # ---------------------------------------------------------------------------
-# 5. Main handler: parse route -> (ws?) -> ensure ready -> forward.
+# 5. Main handler: parse Host -> (help page if not a preview host) -> (ws?) ->
+#    ensure ready -> forward the request path unchanged.
 # ---------------------------------------------------------------------------
 async def handler(request: web.Request):
     # 5a. YOUR auth would go here. This demo proxy is intentionally open.
-    sandbox_id = request.match_info["sandbox_id"]
-    port = int(request.match_info["port"])
-    tail = request.match_info.get("tail", "")
     session: ClientSession = request.app["session"]
+
+    route = parse_preview_host(request.host)
+    if route is None:
+        return await index(request)   # bare base domain / unknown host -> usage help
+    sandbox_id, port = route
 
     if port in RESERVED_PORTS:
         return web.Response(status=403, text=f"Port {port} is reserved by Daytona.")
 
+    path = request.rel_url.path
+
     if request.headers.get("Upgrade", "").lower() == "websocket":
-        return await proxy_ws(request, sandbox_id, port, tail, session)
+        return await proxy_ws(request, sandbox_id, port, path, session)
 
     try:
         preview = await ensure_ready(sandbox_id, port, session)
@@ -208,7 +251,7 @@ async def handler(request: web.Request):
             text=f"<h1>Warming up…</h1><p>{e}</p>",
         )
 
-    target = upstream_url(preview.url, tail, request.rel_url.query)
+    target = upstream_url(preview.url, path, request.rel_url.query)
 
     out_headers = {
         k: v for k, v in request.headers.items() if k.lower() not in HOP_BY_HOP
@@ -234,20 +277,17 @@ async def handler(request: web.Request):
 
 
 # ---------------------------------------------------------------------------
-# 6. A trailing-slash redirect + a plain help page at "/". No sandbox picker
-#    (routing is id-in-the-URL by design) — just usage text.
+# 6. Help page for the bare base domain (or any non-preview host). No sandbox
+#    picker (routing is host-in-the-URL by design) — just usage text.
 # ---------------------------------------------------------------------------
-async def redirect_add_slash(request: web.Request):
-    return web.HTTPFound(f"{request.path}/")
-
-
 async def index(request: web.Request):
+    base = PREVIEW_BASE_DOMAIN or "&lt;PREVIEW_BASE_DOMAIN unset&gt;"
     return web.Response(
         content_type="text/html",
         text=(
             "<h1>Sandbox preview proxy</h1>"
-            "<p>Open <code>/s/&lt;sandboxId&gt;/&lt;port&gt;/</code>. The chat agent "
-            "prints the full URL after it builds a site — it reads the id from "
+            f"<p>Open <code>https://&lt;sandboxId&gt;-&lt;port&gt;.{base}/</code>. The chat "
+            "agent prints the full URL after it builds a site — it reads the id from "
             "<code>$DAYTONA_SANDBOX_ID</code> inside the sandbox.</p>"
         ),
     )
@@ -269,10 +309,8 @@ def build_app() -> web.Application:
     app = web.Application()
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
-    app.router.add_get("/", index)
-    # `/s/<id>/<port>` (no trailing slash) -> redirect so relative paths resolve.
-    app.router.add_route("*", r"/s/{sandbox_id}/{port:\d+}", redirect_add_slash)
-    app.router.add_route("*", r"/s/{sandbox_id}/{port:\d+}/{tail:.*}", handler)
+    # One catch-all: Host decides the sandbox, the path is forwarded verbatim.
+    app.router.add_route("*", "/{tail:.*}", handler)
     return app
 
 

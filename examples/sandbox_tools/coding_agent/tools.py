@@ -10,6 +10,7 @@
 # each tool here has an Input/Result model. That's fine: the two agents deliberately declare their
 # tools differently and share only the impls.
 
+import os
 from datetime import timedelta
 from pathlib import Path
 
@@ -21,6 +22,14 @@ from temporal_agent_harness.harness import agent
 from temporal_agent_harness.harness.sandbox import SandboxConfig
 
 from examples.coding_agent_common import tool_impls
+
+# Base domain the live-preview proxy serves sandbox subdomains under (e.g. "preview.example.com" —
+# a running site is reached at https://<sandboxId>-<port>.<this>/). Read from the worker's env HERE,
+# in this plain (non-workflow) module: workflow.py imports it via `imports_passed_through()`, so the
+# value is resolved once in the real worker process and never read from inside the Temporal workflow
+# sandbox (where env access is non-deterministic). Empty if previews aren't configured — the agent's
+# system instruction then omits the preview steps. See preview_proxy.py for the routing.
+PREVIEW_BASE_DOMAIN = os.environ.get("PREVIEW_BASE_DOMAIN", "").strip().lower()
 
 # The project the agent works on lives HERE, inside the sandbox (created by the Dockerfile). Starts
 # empty — the agent scaffolds a project from scratch. The live-preview supervisor runs whatever the

@@ -1,0 +1,109 @@
+name: build-image
+
+# Build the coding-agent runtime image, push it to GHCR, then build the Daytona snapshot the agent's
+# tools run in — so both are ready before the deployed worker polls. The snapshot is built FROM the
+# just-pushed image (same commit, same examples/ bytes), so its content hash matches exactly what the
+# deployed worker computes and looks up at runtime (SandboxConfig.require_prebuilt=True — the worker
+# never builds the snapshot itself).
+#
+# Required repo secret: DAYTONA_API_KEY (Settings -> Secrets and variables -> Actions).
+# One-time: after the first run, set the GHCR package visibility to Public so `docker compose pull`
+# on the host needs no login.
+
+on:
+  push:
+    branches: [sandbox-tools]
+    paths:
+      - "examples/**"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/build-image.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.img.outputs.name }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Lowercase image name (GHCR requires lowercase)
+        id: img
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata (tags + labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.img.outputs.name }}
+          tags: |
+            type=ref,event=branch
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Build (or verify) the Daytona snapshot the tools run in, using the image we just pushed (pinned by
+  # immutable digest). This uploads examples/ to Daytona and triggers the remote build; it needs only
+  # DAYTONA_API_KEY. Fails the pipeline if the snapshot isn't ready, so a deploy can't race an unbuilt
+  # image (which would surface as SandboxImageNotBuilt on the first tool call).
+  build-snapshot:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require DAYTONA_API_KEY
+        env:
+          DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
+        run: |
+          if [ -z "$DAYTONA_API_KEY" ]; then
+            echo "::error::DAYTONA_API_KEY secret is not set — add it under Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build the Daytona snapshot
+        env:
+          IMAGE: ${{ needs.build-and-push.outputs.image }}@${{ needs.build-and-push.outputs.digest }}
+          DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
+        run: |
+          docker run --rm -e DAYTONA_API_KEY "$IMAGE" python -c "
+          from temporal_agent_harness.harness.sandbox import build_sandbox
+          from examples.sandbox_tools.coding_agent.tools import SANDBOX
+          r = build_sandbox(SANDBOX)
+          print('snapshot:', r.status, '-', r.detail)
+          assert r.status in ('built', 'ready'), f'snapshot build failed: {r.status} {r.detail}'
+          "

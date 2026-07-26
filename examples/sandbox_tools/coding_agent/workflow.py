@@ -31,7 +31,7 @@ with workflow.unsafe.imports_passed_through():
     from examples.coding_agent_common.chat_loop import dispatch_via_runner, run_chat_turn
     from examples.coding_agent_common.todo_tools import todoread, todowrite
 
-    from .tools import SANDBOX, SANDBOXED_CODING_TOOLS
+    from .tools import PREVIEW_BASE_DOMAIN, SANDBOX, SANDBOXED_CODING_TOOLS
 
 
 TASK_QUEUE = "sandboxed-coding-agent"
@@ -40,7 +40,7 @@ DEFAULT_MODEL = "gemini-3.6-flash"
 GENERATION_CONFIG = {"thinking_level": "low", "thinking_summaries": "auto"}
 
 
-SYSTEM_INSTRUCTION = """\
+_BASE_INSTRUCTION = """\
 You are a capable, careful coding assistant. The user talks to you in plain language — asking you \
 to build an app, add a feature, run a command, or explain code — and YOU do the work by calling \
 tools. Your tools run inside an isolated cloud sandbox (never on the user's own machine), on a \
@@ -56,24 +56,38 @@ Skip planning for trivial one-step requests.
 - ORIENT with `glob`/`grep`/`read` before editing existing files, so your changes fit in.
 - READ before you EDIT. `edit` needs an exact, unique `old_string`. Use `write` for new files or \
 full rewrites, `edit` for surgical changes.
-- VERIFY when it's cheap: run the build or tests via `bash` after a change.
+- VERIFY when it's cheap: run the build or tests via `bash` after a change."""
+
+# Only offered when a preview domain is configured (PREVIEW_BASE_DOMAIN). Routing is by SUBDOMAIN
+# (see preview_proxy.py), so the site is served at the ROOT of its own subdomain and behaves like a
+# normal website — no <base href> / relative-path constraints. The agent fills in the sandbox id and
+# the port it chose; the domain is baked in from config.
+_PREVIEW_INSTRUCTION = f"""
 
 ## Making a web app previewable
 
 When the user asks for a website or web app they can open in a browser, this sandbox can serve it \
-live. After building the app in the project directory:
+live at its own subdomain. After building the app in the project directory:
 1. Write the single server-launch command to `start.sh` in the project root (i.e. `write` with \
 file_path="start.sh") — it MUST run in the FOREGROUND (no `&`) and bind 0.0.0.0 on a plain port you \
 pick (e.g. 3000), and `cd` into the project dir first. A supervisor picks this up within ~1s and \
 keeps it running.
    Example: `write` file_path="start.sh" content="cd /home/daytona/project\\npython3 -m http.server 3000 --bind 0.0.0.0\\n"
 2. Read the sandbox id and give the user the preview URL. Run `bash` with `echo "$DAYTONA_SANDBOX_ID"`, \
-then tell them to open http://localhost:8080/s/<that-id>/<port>/ . Prefer RELATIVE asset paths \
-(./style.css) or a <base href> so pages load through the path-based proxy.
+then tell them to open https://<that-id>-<port>.{PREVIEW_BASE_DOMAIN}/ (that-id is the sandbox id, \
+port is the one you chose). The site is served at the ROOT of that subdomain, so build it like any \
+normal website — absolute asset paths (/style.css, /assets/app.js), client-side routing, and calls \
+to /api/… all work as-is. No <base href> or relative-path tricks needed."""
+
+_CLOSING_INSTRUCTION = """
 
 Keep going across tool calls until the task is done, then reply in brief, friendly prose: what you \
 built or changed, which files, and (if relevant) the preview URL. Never invent file contents or \
 command output you didn't actually read."""
+
+SYSTEM_INSTRUCTION = _BASE_INSTRUCTION + (
+    _PREVIEW_INSTRUCTION if PREVIEW_BASE_DOMAIN else ""
+) + _CLOSING_INSTRUCTION
 
 
 @workflow.defn(name="SandboxedCodingAgent")
