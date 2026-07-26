@@ -1,0 +1,30 @@
+# Runnable environment for self-hosting the sandboxed coding agent (examples/sandbox_tools/coding_agent).
+#
+# This fork keeps ONLY that example — the harness itself is pulled as a git dependency on the OFFICIAL
+# repo's `sandbox-tools` branch (the vendored `temporal_agent_harness/` source was deleted; it was
+# byte-identical to that branch). This is not an installable package: it's just a dependency spec that
+# `uv sync` resolves into a venv, from which the four processes run as `python -m examples.*`.
+[project]
+name = "temporal-coding-agent-deploy"
+version = "0.1.0"
+requires-python = ">=3.12"  # the harness `sandbox` extra (remote-box) requires Python >= 3.12
+dependencies = [
+    # The harness + the three extras this example needs:
+    #   sandbox -> remote-box (+ the Daytona SDK)   the tools run in a Daytona cloud sandbox
+    #   ui      -> fastapi[standard] (+ uvicorn)     the packaged web app + browser UI (dist ships in the wheel)
+    #   genai   -> google-genai (+ google-auth)      the agent drives the Gemini Interactions API
+    "temporal-agent-harness[sandbox,ui,genai] @ git+https://github.com/temporal-community/temporal-agent-harness.git@sandbox-tools",
+    # Pin google-genai to the exact version the harness `sandbox-tools` branch was built against.
+    # The Gemini plugin imports the private `google.genai._interactions` module, which was removed
+    # (renamed to a public `interactions.py`) in later releases — 2.14.0 breaks import. 2.8.0 is what
+    # upstream's own lock pinned, so it's the known-good version.
+    "google-genai==2.8.0",
+    # preview_proxy.py imports aiohttp directly (the upstream justfile injected it ad-hoc via
+    # `uv run --with aiohttp`); declare it so it's baked into the image.
+    "aiohttp>=3.9",
+]
+
+[tool.uv]
+# This repo is an environment spec, not a package to build/install — `uv sync --no-install-project`
+# installs only the dependencies above; `examples/` is imported as a namespace package off PYTHONPATH.
+package = false

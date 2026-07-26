@@ -1,0 +1,35 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+.pytest_cache/
+build/
+dist/
+wheels/
+*.egg-info
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv
+
+.env
+.env.local
+
+# Private Temporal connection profiles (e.g. Temporal Cloud creds / api_key). Copy
+# deploy/temporal.cloud.toml.example to deploy/temporal.toml and fill in your credentials.
+temporal.toml
+
+# Node-generated files
+.pnpm-store/
+
+# Local configs for IDEs
+.DS_Store
+.vscode
+pyrightconfig.json
+
+# Temporal server build artifacts
+.build/
+devserver/temporal-server
+
+# Local LLM configs
+.claude/

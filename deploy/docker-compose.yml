@@ -1,0 +1,115 @@
+# Self-host the sandboxed coding agent on a single host (e.g. Hetzner), against Temporal Cloud.
+#
+# All four long-running services share ONE prebuilt public image from GHCR (built by
+# .github/workflows/build-image.yml) and differ only by `command` / `ports` / `volumes`. Shared
+# config (Temporal connection, large-payload settings) lives in .env so it isn't repeated here.
+#
+# Setup + run: see ./README.md. TL;DR:
+#   cp .env.example .env                       # fill GEMINI_API_KEY, DAYTONA_API_KEY
+#   cp temporal.cloud.toml.example temporal.toml   # fill Temporal Cloud address/namespace/api_key
+#   docker compose --profile setup run --rm build-sandbox   # once: build the Daytona snapshot
+#   docker compose up -d
+
+name: coding-agent
+
+# The public GHCR image. Override the tag/owner here if you push under a different name.
+x-image: &image ghcr.io/jasonsteving99/temporal-agent-harness:latest
+
+services:
+  # Shared session-manager worker: launches the agent as a child workflow on its task queue.
+  session-manager:
+    image: *image
+    command: ["python", "-m", "examples.session_manager_worker"]
+    env_file: [.env]
+    volumes:
+      - ./temporal.toml:/run/temporal/temporal.toml:ro
+      - large-payloads:/data/large-payloads
+    restart: unless-stopped
+
+  # FastAPI API + browser UI (the dist ships inside the harness wheel). This is the site you open.
+  server:
+    image: *image
+    command:
+      - python
+      - -m
+      - examples.app
+      - examples/sandbox_tools/coding_agent/agents.toml
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    env_file: [.env]
+    ports: ["3010:8000"]   # host 3010 -> container 8000
+    volumes:
+      - ./temporal.toml:/run/temporal/temporal.toml:ro
+      - large-payloads:/data/large-payloads
+    depends_on: [session-manager]
+    restart: unless-stopped
+
+  # The agent worker. Its bash/read/write/edit/grep/glob tools run in Daytona's CLOUD (needs
+  # DAYTONA_API_KEY), so no Docker-in-Docker here. Needs GEMINI_API_KEY for the Gemini API.
+  worker:
+    image: *image
+    command: ["python", "-m", "examples.sandbox_tools.coding_agent.worker"]
+    env_file: [.env]
+    volumes:
+      - ./temporal.toml:/run/temporal/temporal.toml:ro
+    restart: unless-stopped
+
+  # Live-preview proxy (listens on 8080 in the container, published on host 3011). Routes by
+  # SUBDOMAIN: a request to <sandboxId>-<port>.$PREVIEW_BASE_DOMAIN is forwarded to that sandbox's
+  # port, so previewed sites work like normal sites (absolute asset paths, client routing). Put a
+  # reverse proxy in front that terminates wildcard TLS for *.$PREVIEW_BASE_DOMAIN and forwards here
+  # PRESERVING the Host header (see README). Standalone — needs DAYTONA_API_KEY only, no Temporal.
+  # NOTE: no auth (see README).
+  preview-proxy:
+    image: *image
+    command: ["python", "-m", "examples.sandbox_tools.coding_agent.preview_proxy"]
+    env_file: [.env]
+    ports: ["3011:8080"]   # host 3011 -> container 8080
+    restart: unless-stopped
+
+  # Housekeeping: the large-payload offload driver never deletes what it writes (files are keyed by
+  # content hash), so the shared volume could grow unbounded over time. This tiny sidecar deletes
+  # offloaded files older than PAYLOAD_GC_MAX_AGE_DAYS (default 7) every PAYLOAD_GC_INTERVAL_SECONDS
+  # (default daily). `$$` escapes compose interpolation so the vars are read inside the container.
+  # NOTE: a chat session left open longer than the retention window could, in the rare case its input
+  # was offloaded, lose that payload on replay — bump PAYLOAD_GC_MAX_AGE_DAYS if you keep sessions
+  # open for many days (coding-agent payloads are almost always small and never offloaded at all).
+  payload-gc:
+    image: alpine:3.20
+    environment:
+      MAX_AGE_DAYS: ${PAYLOAD_GC_MAX_AGE_DAYS:-7}
+      INTERVAL_SECONDS: ${PAYLOAD_GC_INTERVAL_SECONDS:-86400}
+    command:
+      - sh
+      - -c
+      - |
+        while true; do
+          find /data/large-payloads -type f -mtime +$$MAX_AGE_DAYS -delete 2>/dev/null || true
+          sleep "$$INTERVAL_SECONDS"
+        done
+    volumes:
+      - large-payloads:/data/large-payloads
+    restart: unless-stopped
+
+  # One-shot: build the Daytona snapshot the tools run on. Run ONCE before `up` (and again whenever
+  # tools.py / coding_agent_common/tool_impls.py / the snapshot Dockerfile change). Needs only
+  # DAYTONA_API_KEY. Not started by `up` (setup profile):
+  #   docker compose --profile setup run --rm build-sandbox
+  build-sandbox:
+    image: *image
+    profiles: ["setup"]
+    command:
+      - python
+      - -c
+      - "from temporal_agent_harness.harness.sandbox import build_sandbox; from examples.sandbox_tools.coding_agent.tools import SANDBOX; print(build_sandbox(SANDBOX))"
+    env_file: [.env]
+    restart: "no"
+
+volumes:
+  # Docker-managed named volume for Temporal large-payload offload (LARGE_PAYLOAD_DRIVER=local) —
+  # Docker owns the storage, you never touch a host path. Correct for a single host; use S3
+  # (LARGE_PAYLOAD_DRIVER=s3) if you ever split these across machines. The payload-gc sidecar keeps
+  # it from growing unbounded.
+  large-payloads:

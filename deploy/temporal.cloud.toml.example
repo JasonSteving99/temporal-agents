@@ -1,0 +1,21 @@
+# Copy to `temporal.toml` (gitignored) and fill in your Temporal Cloud connection. This is the
+# temporalio env-config format (https://docs.temporal.io/cli#environment-configuration); the harness
+# reads it via ClientConfig.load_client_connect_config(), selecting the profile named by
+# TEMPORAL_PROFILE. docker-compose mounts this file read-only at /run/temporal/temporal.toml.
+
+[profile.default]
+# Cloud gRPC endpoint, e.g. "my-namespace.a1b2c.tmprl.cloud:7233".
+address = "<namespace>.<account>.tmprl.cloud:7233"
+# Full namespace id, e.g. "my-namespace.a1b2c".
+namespace = "<namespace>.<account>"
+# --- Option A: API key auth (simplest) ---
+api_key = "<your-temporal-cloud-api-key>"
+# TLS is required for Cloud; an empty [tls] table enables it.
+[profile.default.tls]
+
+# --- Option B: mTLS auth (client certificate) ---
+# Remove the api_key line above and use certificate paths instead. Mount the cert/key into the
+# containers (add them to each service's `volumes` in docker-compose.yml) and reference them here:
+# [profile.default.tls]
+# client_cert_path = "/run/temporal/client.pem"
+# client_key_path  = "/run/temporal/client.key"
