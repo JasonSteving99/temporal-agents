@@ -13,7 +13,7 @@
 name: coding-agent
 
 # The public GHCR image. Override the tag/owner here if you push under a different name.
-x-image: &image ghcr.io/jasonsteving99/temporal-agent-harness:latest
+x-image: &image ghcr.io/jasonsteving99/temporal-agents:latest
 
 services:
   # Shared session-manager worker: launches the agent as a child workflow on its task queue.

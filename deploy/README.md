@@ -33,7 +33,7 @@ you normally don't run the snapshot build by hand.
 2. Push to `main` (or run the workflow manually via *Actions → build-image → Run workflow*). The run
    pushes the image **and** builds the Daytona snapshot.
 3. Make the image package public so the host can pull without logging in:
-   > GitHub → your profile → **Packages** → the `temporal-agent-harness` container → **Package
+   > GitHub → your profile → **Packages** → the `temporal-agents` container → **Package
    > settings** → **Change visibility** → **Public**.
    (Or keep it private and `docker login ghcr.io` on the host with a PAT that has `read:packages`.)
 
@@ -51,7 +51,7 @@ feeds both the worker (the URL it hands the user) and the proxy (Host parsing). 
 previews off entirely.
 
 Both `.env` and `temporal.toml` are gitignored. If the image is under a different owner/tag than
-`ghcr.io/jasonsteving99/temporal-agent-harness:latest`, edit the `x-image` line in
+`ghcr.io/jasonsteving99/temporal-agents:latest`, edit the `x-image` line in
 `docker-compose.yml`.
 
 ## Run
