@@ -1,5 +1,5 @@
 """
-Daytona custom preview proxy for the sandboxed-tool demo — path-based routing.
+Daytona custom preview proxy for the sandboxed coding agent — path-based routing.
 
 Purpose: sit in front of Daytona's preview endpoint so a stopped CONTAINER
 sandbox is woken on demand and the server (relaunched by the snapshot's
@@ -112,12 +112,12 @@ async def ensure_ready(sandbox_id: str, port: int, session: ClientSession):
     sandbox = await daytona.get(sandbox_id)
     if sandbox.state != SandboxState.STARTED:
         # This is where the snapshot entrypoint supervisor (supervise.sh) re-runs
-        # /home/daytona/start.sh and relaunches the server. start() waits until
+        # /home/daytona/project/start.sh and relaunches the server. start() waits until
         # the sandbox itself is "started" (not until the server binds).
         await sandbox.start()
     # Cap the compute bill: auto-stop after AUTO_STOP_MINUTES of no SDK activity.
     # Daytona counts SDK interactions (state changes, process.exec, etc.) as
-    # activity but NOT preview HTTP traffic — so the agent's own run_bash keeps an
+    # activity but NOT preview HTTP traffic — so the agent's own tool calls keep an
     # active chat turn alive, while a sandbox left idle (e.g. a preview tab open
     # but quiet) stops itself. A later request just wakes it again (brief
     # "warming up"). Set once per id; Daytona persists it.

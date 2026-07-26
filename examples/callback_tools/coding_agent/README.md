@@ -41,12 +41,18 @@ phase isn't throttled by approving one thing at a time.
 
 | File | Role |
 | --- | --- |
-| `tools.py` | The six callback tools — declarations only (`...` bodies); the shim supplies the impl. |
-| `workflow.py` | `CodingAgent`: a Gemini tool-calling loop that converses and calls the tools. |
+| `tools.py` | The six callback tools — declarations only (`...` bodies); the shim supplies the impl. Imports `todowrite`/`todoread` from the shared `coding_agent_common`. |
+| `workflow.py` | `CodingAgent`: sets up the toolset + approval policy and drives the shared Gemini tool-calling loop (`coding_agent_common.chat_loop`). |
 | `worker.py` | Hosts `CodingAgent` (no tool activities — callback tools are inline). |
 | `agents.toml` | This example's registry (just the `CodingAgent`). |
-| `opencode_shim/` | The OpenCode-protocol server. `harness_backend.py` fronts the workflow; `local_tools.py` executes the callback tools on your disk; `backend.py` defines the `AgentBackend` protocol + the `AgentTurn` seam. |
+| `opencode_shim/` | The OpenCode-protocol server. `harness_backend.py` fronts the workflow; `local_tools.py` runs the shared `coding_agent_common.tool_impls` on your disk to fulfill callbacks; `backend.py` defines the `AgentBackend` protocol + the `AgentTurn` seam. |
 | `justfile` | Recipes for the local stack. |
+
+This agent shares its tool implementations, task-list tools, and conversational loop with the
+**sandboxed** coding agent ([`examples/sandbox_tools/coding_agent`](../../sandbox_tools/coding_agent))
+via [`examples/coding_agent_common`](../../coding_agent_common) — same six tools, same
+implementations; the difference is that this one runs them on your laptop (via callback + the shim)
+while the sandboxed one runs them inside a Daytona cloud box.
 
 The web server and session-manager worker are **shared across examples** — `just server` points
 the shared `examples/app.py` at this example's `agents.toml`, and `just session-manager` runs the

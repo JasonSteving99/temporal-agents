@@ -1,20 +1,19 @@
-"""Worker for the interactive sandboxed-tool demo agent.
+"""Worker for the sandboxed coding agent.
 
 Run from the repo root with:
-    uv run --extra sandbox --group examples python -m examples.sandboxed_tool_demo.worker
+    uv run --extra sandbox --group examples python -m examples.sandbox_tools.coding_agent.worker
 
-Hosts SandboxedToolDemoAgent plus its sandbox lifecycle activities (SANDBOX_ACTIVITIES) and its
-one sandboxed tool's activity (run_bash). The Gemini plugin is registered because this agent
-drives the Gemini Interactions API to converse and decide when to call run_bash; the plugin
-auto-registers its interactions activity. Run `just build-sandbox` (or
-`temporal_agent_harness.harness.sandbox.build_sandbox`) once before starting this worker —
-runtime never builds the sandbox image implicitly (SandboxConfig.require_prebuilt).
+Hosts SandboxedCodingAgentWorkflow plus its sandbox lifecycle activities (SANDBOX_ACTIVITIES) and
+its six sandboxed tools' activities (bash/read/write/edit/grep/glob). The Gemini plugin is
+registered because the agent drives the Gemini Interactions API; the plugin auto-registers its
+interactions activity. Run `just build-sandbox` once before starting this worker — runtime never
+builds the sandbox image implicitly (SandboxConfig.require_prebuilt).
 
 Env vars (set in .env.local — see .env.example):
     TEMPORAL_CONFIG_FILE / TEMPORAL_PROFILE   Temporal connection profile
     GEMINI_API_KEY                            required — the agent calls the Gemini API
-    DAYTONA_API_KEY                           required — tools.py's SANDBOX runs on Daytona
-    SANDBOXED_TOOL_DEMO_TASK_QUEUE            task queue to poll (default: sandboxed-tool-demo)
+    DAYTONA_API_KEY                           required — the tools run on Daytona
+    SANDBOXED_CODING_AGENT_TASK_QUEUE         task queue to poll (default: sandboxed-coding-agent)
 """
 
 import asyncio
@@ -32,8 +31,8 @@ from temporal_agent_harness.ai_sdks.google_genai_plugin import GoogleGenAIPlugin
 from temporal_agent_harness.harness import agent
 from temporal_agent_harness.harness.sandbox.activities import SANDBOX_ACTIVITIES
 
-from .tools import run_bash
-from .workflow import TASK_QUEUE, SandboxedToolDemoAgent
+from .tools import SANDBOXED_CODING_TOOLS
+from .workflow import TASK_QUEUE, SandboxedCodingAgentWorkflow
 
 
 async def main() -> None:
@@ -43,7 +42,7 @@ async def main() -> None:
         force=True,
     )
 
-    task_queue = os.environ.get("SANDBOXED_TOOL_DEMO_TASK_QUEUE", TASK_QUEUE)
+    task_queue = os.environ.get("SANDBOXED_CODING_AGENT_TASK_QUEUE", TASK_QUEUE)
 
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
@@ -60,14 +59,16 @@ async def main() -> None:
     worker = Worker(
         client,
         task_queue=task_queue,
-        workflows=[SandboxedToolDemoAgent],
-        # SANDBOX_ACTIVITIES: sandbox activate/pause/terminate. tool_activity(run_bash): the one
-        # sandboxed tool's durable body. The Gemini interactions activity is registered by the
-        # plugin above.
-        activities=[*SANDBOX_ACTIVITIES, agent.tool_activity(run_bash)],
+        workflows=[SandboxedCodingAgentWorkflow],
+        # SANDBOX_ACTIVITIES: sandbox activate/pause/terminate. One tool_activity per sandboxed tool:
+        # each tool's durable body. The Gemini interactions activity is registered by the plugin.
+        activities=[
+            *SANDBOX_ACTIVITIES,
+            *(agent.tool_activity(tool) for tool in SANDBOXED_CODING_TOOLS),
+        ],
     )
     print(
-        f"sandboxed-tool-demo worker ready: "
+        f"sandboxed-coding-agent worker ready: "
         f"profile={os.environ.get('TEMPORAL_PROFILE', 'default')!r} "
         f"address={connect_config.get('target_host')} "
         f"namespace={connect_config.get('namespace')} "

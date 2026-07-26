@@ -9,8 +9,10 @@
 # comes back automatically. No agent action at runtime.
 #
 # Contract:
-#   * The agent writes ONE launch command into $START_FILE (see start.sh).
+#   * The agent writes ONE launch command into $START_FILE.
 #   * Optional env/secrets live in $ENV_FILE and are sourced before each launch.
+#   * Both live INSIDE the project dir (/home/daytona/project) so the agent can create them with its
+#     own `write` tool, which confines writes to the project root (must match tools.py's PROJECT_ROOT).
 #   * All of this lives on the PERSISTENT filesystem, so it survives
 #     stop -> start and archive -> start cycles unchanged.
 
@@ -19,8 +21,11 @@ set -u -o pipefail
 # can signal the whole tree (server + anything it spawned), not just the shell.
 set -m
 
-START_FILE="${START_FILE:-/home/daytona/start.sh}"
-ENV_FILE="${ENV_FILE:-/home/daytona/env}"
+# START_FILE/ENV_FILE live INSIDE the project dir so the agent can create them with its `write` tool
+# (writes are confined to the project root). LOG stays OUTSIDE the project so the server's log doesn't
+# pollute the agent's grep/glob/git of its own project (it can still `bash cat` it if it needs to).
+START_FILE="${START_FILE:-/home/daytona/project/start.sh}"
+ENV_FILE="${ENV_FILE:-/home/daytona/project/.env}"
 LOG="${SERVER_LOG:-/home/daytona/server.log}"
 MIN_BACKOFF=1
 MAX_BACKOFF=30
