@@ -63,7 +63,7 @@ services:
   # PRESERVING the Host header (see README). Standalone — needs DAYTONA_API_KEY only, no Temporal.
   # Previews are gated by Firebase Google sign-in once FIREBASE_API_KEY is set in .env; with it
   # blank, previews are open to anyone. Admins (PREVIEW_ADMIN_EMAILS) manage who else gets in from
-  # the panel at https://login.$PREVIEW_BASE_DOMAIN/__auth/admin (see README).
+  # the panel at https://$PREVIEW_BASE_DOMAIN/__auth/admin (see README).
   preview-proxy:
     image: *image
     command: ["python", "-m", "examples.sandbox_tools.coding_agent.preview"]

@@ -5,7 +5,7 @@ panel that edits the guest list.
 Sign-in flow — an unauthenticated request to any sandbox subdomain is redirected
 here, and the round trip is:
 
-    GET  /__auth/login    -> the Firebase sign-in page (login host only)
+    GET  /__auth/login    -> the Firebase sign-in page (AUTH_HOST only)
     POST /__auth/session  <- {idToken, next}; verified, then our cookie is set
     GET  <next>              back to whatever they were trying to reach
 

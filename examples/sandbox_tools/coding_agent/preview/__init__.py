@@ -22,7 +22,9 @@ prefix rewriting. That's the whole reason for subdomain routing.
 
 Access is gated by Firebase Authentication (Google sign-in): sandbox previews are
 otherwise readable by anyone who can guess a subdomain. See `session.py` for the
-gate and `allowlist.py` for who gets through it.
+gate and `allowlist.py` for who gets through it. The base domain itself —
+`https://<PREVIEW_BASE_DOMAIN>/` — is not forwarded anywhere; we serve the
+gallery, sign-in and admin panel there ourselves (`home.py`).
 
 Deployment (see deploy/README.md): point a WILDCARD DNS record
 `*.<PREVIEW_BASE_DOMAIN>` at the host, and run a reverse proxy (Caddy/Traefik/

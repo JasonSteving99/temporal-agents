@@ -13,7 +13,6 @@ from daytona import AsyncDaytona, DaytonaConfig, SandboxState
 from yarl import URL
 
 from .config import (
-    AUTH_ENABLED,
     AUTH_HOST,
     AUTO_STOP_MINUTES,
     DAYTONA_API_KEY,
@@ -279,9 +278,11 @@ async def handler(request: web.Request):
 # ---------------------------------------------------------------------------
 async def check(request: web.Request) -> web.Response:
     domain = request.query.get("domain", "").strip().lower()
-    # The sign-in host is a real site we serve, so Caddy must be allowed a cert for
-    # it — without this, login.<base> is unreachable and nobody can get past the gate.
-    if AUTH_ENABLED and domain == AUTH_HOST:
+    # AUTH_HOST is a real site we serve (gallery + sign-in + admin), so Caddy must be
+    # allowed a cert for it. Not gated on AUTH_ENABLED: the gallery is served there
+    # whether or not the auth gate is switched on. Only relevant if you put AUTH_HOST
+    # in an on-demand block — a dedicated site block gets a normal cert and never asks.
+    if AUTH_HOST and domain == AUTH_HOST:
         return web.Response(status=200)
     route = parse_preview_host(domain)
     if route is None:

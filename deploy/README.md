@@ -79,7 +79,15 @@ The preview proxy routes by **subdomain**: `https://<sandboxId>-<port>.<PREVIEW_
 forwarded to that sandbox's port, path untouched — so previewed sites work like any normal site (no
 subpath prefix, no `<base href>`). To make that reachable:
 
-1. **Wildcard DNS:** add an `A`/`AAAA` record for `*.<PREVIEW_BASE_DOMAIN>` pointing at this host.
+1. **DNS — two records, not one:**
+   - `*.<PREVIEW_BASE_DOMAIN>` → this host. Serves the sandbox subdomains.
+   - `<PREVIEW_BASE_DOMAIN>` → this host. Serves the gallery, sign-in and admin panel.
+
+   The second one is easy to miss: **a wildcard does not match the name it hangs off**, so
+   `*.preview.example.com` leaves `preview.example.com` itself unresolvable. If your base domain is a
+   zone apex your DNS host won't point at a bare IP, set `PREVIEW_AUTH_HOST` (e.g.
+   `login.<PREVIEW_BASE_DOMAIN>`) to move those pages onto a name the wildcard already covers, and
+   skip the extra record and the extra Caddy block below.
 2. **Per-subdomain TLS + Host passthrough:** run a reverse proxy in front of the preview proxy (host
    port `3011`) that terminates TLS and forwards the Host header unchanged. A single-label domain
    pattern (`*.preview.example.com`) is why sandboxId+port share one label (`<sandboxId>-<port>`)
@@ -105,6 +113,13 @@ otherwise), so Caddy only issues certs for real, live sandboxes:
     }
 }
 
+# The gallery / sign-in / admin host. A single known name, so it gets an ordinary
+# automatic cert — no on-demand, no `ask` round trip. Caddy prefers this exact-match
+# block over the wildcard below, so ordering doesn't matter.
+preview.example.com {
+    reverse_proxy localhost:3011
+}
+
 *.preview.example.com {
     tls {
         on_demand
@@ -112,6 +127,10 @@ otherwise), so Caddy only issues certs for real, live sandboxes:
     reverse_proxy localhost:3011                 # the preview-proxy service; Host is preserved
 }
 ```
+
+(If you set `PREVIEW_AUTH_HOST` to something under the wildcard instead, drop the first block —
+the wildcard already covers it, and `/check` returns `200` for that host so on-demand issues its
+cert.)
 
 The FastAPI server (`3010`) is a normal single-host site — front it however you like (e.g.
 `agent.example.com → localhost:3010`).
@@ -123,10 +142,8 @@ sandbox subdomain. Set `FIREBASE_API_KEY` in `.env` to turn the gate on (blank =
 all). Setup, once:
 
 1. **Firebase Console → Authentication → Sign-in method:** enable the **Google** provider.
-2. **→ Settings → Authorized domains:** add `login.<PREVIEW_BASE_DOMAIN>`. That single host is the
-   only origin sign-in ever runs on — it needs no DNS or Caddy changes, since the wildcard record and
-   the `*.<PREVIEW_BASE_DOMAIN>` block already cover it, and `/check` returns `200` for it so Caddy
-   will issue its cert.
+2. **→ Settings → Authorized domains:** add `<PREVIEW_BASE_DOMAIN>` (or whatever you set
+   `PREVIEW_AUTH_HOST` to). That single host is the only origin sign-in ever runs on.
 3. **→ Project settings → Your apps → SDK setup and configuration:** copy `apiKey`, `authDomain` and
    `projectId` into `FIREBASE_API_KEY` / `FIREBASE_AUTH_DOMAIN` / `FIREBASE_PROJECT_ID`.
 4. Set **`PREVIEW_ADMIN_EMAILS`** to your own email. This is not optional — Google sign-in accepts
@@ -136,7 +153,7 @@ all). Setup, once:
 
 ## The preview gallery
 
-**`https://login.<PREVIEW_BASE_DOMAIN>/`** lists every preview site the proxy has ever served — the
+**`https://<PREVIEW_BASE_DOMAIN>/`** lists every preview site the proxy has ever served — the
 home page after you sign in, and the way to find sites from old agent sessions whose sandbox ids only
 ever existed in a chat transcript. Admins get a **Manage access** link there too, so the admin path
 isn't something to memorise.
@@ -167,7 +184,8 @@ working; set `PREVIEW_SCREENSHOTS=0` to skip the attempt entirely.
 
 ### Adding people
 
-Sign in and open **`https://login.<PREVIEW_BASE_DOMAIN>/__auth/admin`**. Add or remove guests there
+Sign in and open **`https://<PREVIEW_BASE_DOMAIN>/__auth/admin`** — or just click **Manage access**
+on the gallery. Add or remove guests there
 and it takes effect immediately — no restart, no redeploy, no editing `.env`. The list is stored as
 JSON on the `preview-auth` Docker volume.
 
@@ -195,7 +213,7 @@ Other things worth knowing:
 - You can also edit the JSON on the host directly; the proxy notices the change without a restart.
 
 How sign-in works: an unauthenticated request to any `<sandboxId>-<port>` subdomain is redirected to
-`https://login.<PREVIEW_BASE_DOMAIN>/__auth/login`, which signs in with Firebase and posts the ID
+`https://<PREVIEW_BASE_DOMAIN>/__auth/login`, which signs in with Firebase and posts the ID
 token back. The proxy verifies that token against Google's Identity Toolkit (no service-account key
 needed), checks the allowlist, and sets an HMAC-signed `HttpOnly` cookie scoped to
 `<PREVIEW_BASE_DOMAIN>` — so one sign-in covers every sandbox subdomain and steady-state requests

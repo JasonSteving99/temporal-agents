@@ -7,12 +7,11 @@ plus the routes that back it.
     POST /__apps/refresh                     re-screenshot one app
     POST /__apps/forget                      drop one app from the gallery
 
-It lives at the ROOT OF THE LOGIN HOST rather than the bare base domain because
-that host is the only one guaranteed to be reachable: the wildcard DNS record and
-the wildcard Caddy block cover `login.<base>`, while the apex `<base>` needs its
-own A record and its own Caddy site block. Putting the gallery there also means
-signing in lands you somewhere useful, and it makes the admin panel reachable by
-a link instead of a memorised path.
+It lives at the root of AUTH_HOST — by default the base domain itself, so the
+gallery is just `https://<PREVIEW_BASE_DOMAIN>/`. Signing in therefore lands you
+somewhere useful, and the admin panel is reachable by a link rather than a
+memorised path. (`*.<base>` doesn't match `<base>`, so that host needs its own
+DNS record and Caddy block; config.AUTH_HOST explains the fallback.)
 
 Everything here is behind `is_authed`. The gallery lists every sandbox id you own
 — that's a map of exactly what to visit, so it must never be public even though

@@ -30,20 +30,30 @@ PROXY_PORT = int(os.environ.get("PREVIEW_PROXY_PORT", "8080"))
 AUTO_STOP_MINUTES = int(os.environ.get("PREVIEW_AUTO_STOP_MINUTES", "3"))
 
 # --- Firebase auth gate ---------------------------------------------------
-# Sign-in happens only at https://login.<PREVIEW_BASE_DOMAIN>/, which the existing
-# wildcard DNS + wildcard Caddy block already cover, so there's no new infra — and
-# it's the ONLY host you must add to Firebase Console -> Authentication ->
-# Settings -> Authorized domains. The session cookie is scoped to
-# Domain=<PREVIEW_BASE_DOMAIN>, so one sign-in covers every sandbox subdomain.
-#
 # The gate is OFF when FIREBASE_API_KEY is unset, so the example still runs
 # unconfigured (open). It is ON as soon as you set the key.
 FIREBASE_API_KEY = os.environ.get("FIREBASE_API_KEY", "").strip()
 FIREBASE_AUTH_DOMAIN = os.environ.get("FIREBASE_AUTH_DOMAIN", "").strip()
 FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "").strip()
 
+# THE ONE HOST WE SERVE OURSELVES — the gallery, sign-in, and the admin panel all
+# live here; everything else is a sandbox subdomain we forward. It defaults to the
+# base domain, so the gallery is simply https://<PREVIEW_BASE_DOMAIN>/.
+#
+# That default asks slightly more of your DNS than the wildcard alone: `*.<base>`
+# does NOT match `<base>` itself, so the base domain needs its own A/AAAA record
+# and its own Caddy site block (see deploy/README.md). If you can't add those —
+# e.g. <base> is a zone apex your DNS host won't point at an IP — set
+# PREVIEW_AUTH_HOST to a subdomain the wildcard already covers, such as
+# "login.<base>", and no DNS or Caddy change is needed at all.
+#
+# Whichever you pick, this is the ONLY host to add to Firebase Console ->
+# Authentication -> Settings -> Authorized domains, because it's the only origin
+# sign-in ever runs on. The session cookie is scoped to Domain=<PREVIEW_BASE_DOMAIN>,
+# which covers the base domain AND every sandbox subdomain either way.
+AUTH_HOST = os.environ.get("PREVIEW_AUTH_HOST", "").strip().lower() or PREVIEW_BASE_DOMAIN
+
 AUTH_ENABLED = bool(FIREBASE_API_KEY and PREVIEW_BASE_DOMAIN)
-AUTH_HOST = f"login.{PREVIEW_BASE_DOMAIN}" if PREVIEW_BASE_DOMAIN else ""
 
 # Key that signs session cookies. Unset -> random per process, i.e. everyone is
 # logged out whenever the proxy restarts. Set it in .env to avoid that.
