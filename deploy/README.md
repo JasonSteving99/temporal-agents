@@ -132,8 +132,9 @@ preview.example.com {
 the wildcard already covers it, and `/check` returns `200` for that host so on-demand issues its
 cert.)
 
-The FastAPI server (`3010`) is a normal single-host site — front it however you like (e.g.
-`agent.example.com → localhost:3010`).
+The FastAPI server (`3010`) has **no auth of its own**. Either keep it on a private network
+(firewall / Tailscale / SSH tunnel), or publish it through the preview proxy behind the admin gate —
+see [Reaching the agent from anywhere](#reaching-the-agent-from-anywhere).
 
 ## Preview auth (Firebase)
 
@@ -150,6 +151,34 @@ all). Setup, once:
    *any* Google account, so the allowlist is what actually keeps strangers out, and with no admins
    and no guests nobody gets in at all.
 5. Set `PREVIEW_SESSION_SECRET` (`openssl rand -hex 32`), or sessions die on each proxy restart.
+
+## Reaching the agent from anywhere
+
+The chat UI on `3010` has no auth of its own, which is why it normally stays on a private network.
+One line in `.env` publishes it through the preview proxy instead, behind the sign-in you already
+have:
+
+```bash
+PREVIEW_AGENT_UPSTREAM=http://server:8000
+```
+
+It then answers at **`https://agent.<PREVIEW_BASE_DOMAIN>/`**, and admins get an **Open agent** button
+on the gallery. Nothing else to configure: that hostname is an ordinary `<label>.<base>` name, so your
+wildcard DNS record and wildcard Caddy block already route it, and the session cookie already covers
+it. No new DNS record, no new Caddy block, no new Firebase authorized domain.
+
+**It is gated on `is_admin`, not `is_authed`** — the one place in this proxy where a signed-in guest
+is refused. Previews only cost a sandbox wake; the agent spends model tokens and Daytona compute on
+every message, so friends you add to the guest list can browse your preview sites but cannot run the
+agent. A guest who finds the URL gets a plain "Admins only" page rather than a redirect to sign-in,
+which would only loop them back.
+
+Requests stream rather than buffer, so the UI's `text/event-stream` attach endpoint behaves exactly
+as it does over Tailscale — tokens appear as they're generated, not in one lump when the turn ends.
+
+You can keep Tailscale as-is; `3010` is still published on the host and this changes nothing about
+it. If you'd rather it *only* be reachable through the gate, drop the `ports:` line from the `server`
+service — the proxy reaches it over the compose network, not the published port.
 
 ## The preview gallery
 

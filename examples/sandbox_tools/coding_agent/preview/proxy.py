@@ -13,15 +13,19 @@ from daytona import AsyncDaytona, DaytonaConfig, SandboxState
 from yarl import URL
 
 from .config import (
+    AGENT_ENABLED,
+    AGENT_HOST,
+    AGENT_UPSTREAM,
     AUTH_HOST,
     AUTO_STOP_MINUTES,
     DAYTONA_API_KEY,
     DAYTONA_TARGET,
     PREVIEW_BASE_DOMAIN,
 )
+from .pages import DENIED_PAGE
 from .registry import app_key, registry
 from .screenshots import schedule_capture
-from .session import is_authed, redirect_to_login
+from .session import is_admin, is_authed, redirect_to_login
 
 
 def _make_daytona() -> AsyncDaytona:
@@ -152,6 +156,65 @@ def upstream_url(preview_url: str, path: str, query: "URL") -> URL:
 
 
 # ---------------------------------------------------------------------------
+# Byte-for-byte forwarding, shared by the sandbox previews and the agent app.
+#
+# Streams the response as it arrives rather than buffering it, which is what makes
+# Server-Sent Events work — the agent UI holds a text/event-stream open on
+# /api/attach for the life of a chat, and a proxy that waited for EOF would show
+# the user nothing until the turn finished. Content-Length is dropped with the
+# other hop-by-hop headers, so a streamed body stays chunked.
+# ---------------------------------------------------------------------------
+async def forward(
+    request: web.Request,
+    session: ClientSession,
+    target: "URL | str",
+    extra_headers: "dict[str, str] | None" = None,
+) -> web.StreamResponse:
+    out_headers = {
+        k: v for k, v in request.headers.items() if k.lower() not in HOP_BY_HOP
+    }
+    out_headers.update(extra_headers or {})
+
+    body = await request.read()
+    async with session.request(
+        request.method, str(target), headers=out_headers, data=body,
+        allow_redirects=False,
+    ) as upstream:
+        resp_headers = {
+            k: v for k, v in upstream.headers.items() if k.lower() not in HOP_BY_HOP
+        }
+        resp = web.StreamResponse(status=upstream.status, headers=resp_headers)
+        await resp.prepare(request)
+        async for chunk in upstream.content.iter_any():
+            await resp.write(chunk)
+        await resp.write_eof()
+        return resp
+
+
+# ---------------------------------------------------------------------------
+# The agent chat app, ADMINS ONLY (see config.AGENT_HOST). Every message here
+# spends model tokens and Daytona compute, so `is_admin` — a signed-in guest who
+# can view previews is explicitly not allowed to run the agent.
+# ---------------------------------------------------------------------------
+async def proxy_agent(request: web.Request, session: ClientSession) -> web.StreamResponse:
+    if not is_admin(request):
+        if is_authed(request):
+            # Signed in, just not an admin. A redirect to sign-in would loop them
+            # straight back here, so say plainly what happened.
+            return web.Response(status=403, content_type="text/html", text=DENIED_PAGE)
+        return redirect_to_login(request)
+    # No WebSocket branch: the harness web app streams with SSE, not websockets, and
+    # SSE is a plain streamed GET that forward() already handles. If it ever grows a
+    # websocket endpoint, this needs a bridge like proxy_ws below.
+    target = URL(AGENT_UPSTREAM + request.rel_url.path).with_query(request.rel_url.query)
+    return await forward(request, session, target, {
+        # Let the app build correct absolute URLs even though it sees a plain HTTP hop.
+        "X-Forwarded-Host": request.headers.get("Host", ""),
+        "X-Forwarded-Proto": request.headers.get("X-Forwarded-Proto", "https"),
+    })
+
+
+# ---------------------------------------------------------------------------
 # WebSocket passthrough (HMR, live reload). Daytona auto-detects the upgrade
 # and skips its warning page; we just bridge client <-> upstream and carry
 # the token + forwarded host.
@@ -202,6 +265,12 @@ async def proxy_ws(request, sandbox_id, port, path, session):
 async def handler(request: web.Request):
     session: ClientSession = request.app["session"]
 
+    # The agent app gets its own host, checked before sandbox parsing. It can't be
+    # mistaken for a sandbox anyway (no "-<port>" suffix), but keeping it first makes
+    # the precedence explicit.
+    if AGENT_ENABLED and request.host.split(":")[0].lower() == AGENT_HOST:
+        return await proxy_agent(request, session)
+
     route = parse_preview_host(request.host)
     if route is None:
         return await index(request)   # bare base domain / unknown host -> usage help
@@ -244,28 +313,11 @@ async def handler(request: web.Request):
         schedule_capture(app_key(sandbox_id, port), preview.url, preview.token)
 
     target = upstream_url(preview.url, path, request.rel_url.query)
-
-    out_headers = {
-        k: v for k, v in request.headers.items() if k.lower() not in HOP_BY_HOP
-    }
-    out_headers["X-Forwarded-Host"] = request.headers.get("Host", "")  # required by Daytona
-    out_headers["X-Daytona-Preview-Token"] = preview.token             # fresh, post-start
-    out_headers["X-Daytona-Skip-Preview-Warning"] = "true"             # we own the UX
-
-    body = await request.read()
-    async with session.request(
-        request.method, str(target), headers=out_headers, data=body,
-        allow_redirects=False,
-    ) as upstream:
-        resp_headers = {
-            k: v for k, v in upstream.headers.items() if k.lower() not in HOP_BY_HOP
-        }
-        resp = web.StreamResponse(status=upstream.status, headers=resp_headers)
-        await resp.prepare(request)
-        async for chunk in upstream.content.iter_any():
-            await resp.write(chunk)
-        await resp.write_eof()
-        return resp
+    return await forward(request, session, target, {
+        "X-Forwarded-Host": request.headers.get("Host", ""),   # required by Daytona
+        "X-Daytona-Preview-Token": preview.token,              # fresh, post-start
+        "X-Daytona-Skip-Preview-Warning": "true",              # we own the UX
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -283,6 +335,10 @@ async def check(request: web.Request) -> web.Response:
     # whether or not the auth gate is switched on. Only relevant if you put AUTH_HOST
     # in an on-demand block — a dedicated site block gets a normal cert and never asks.
     if AUTH_HOST and domain == AUTH_HOST:
+        return web.Response(status=200)
+    # Same for the agent host — it's a name we serve, not a sandbox, so the
+    # sandbox-existence check below would reject it.
+    if AGENT_ENABLED and domain == AGENT_HOST:
         return web.Response(status=200)
     route = parse_preview_host(domain)
     if route is None:

@@ -78,6 +78,28 @@ ALLOWLIST_PATH = os.environ.get(
 
 MAX_GUESTS = 200          # bounds the file; also bounds the panel's DOM
 
+# --- The agent chat app, reverse-proxied ADMINS ONLY ----------------------
+# The agent UI spends real money (model tokens, Daytona compute) on every message,
+# so unlike previews it is never opened to guests — the gate here is is_admin, not
+# is_authed. That's the whole reason this lives behind the same proxy instead of
+# being published directly: the admin check already exists and is already tested.
+#
+# AGENT_HOST needs no new DNS record or Caddy block — it's an ordinary
+# "<label>.<PREVIEW_BASE_DOMAIN>" name, so the wildcard record and the wildcard
+# Caddy site block already cover it, exactly like a sandbox subdomain. It can't
+# collide with one either: sandbox hosts must end in "-<port>".
+AGENT_HOST = os.environ.get("PREVIEW_AGENT_HOST", "").strip().lower() or (
+    f"agent.{PREVIEW_BASE_DOMAIN}" if PREVIEW_BASE_DOMAIN else ""
+)
+
+# Where the FastAPI server actually listens, e.g. "http://server:8000" (the compose
+# service name). EMPTY BY DEFAULT — opting in is deliberate, because it's the switch
+# that takes the agent from "reachable only over Tailscale" to "reachable from the
+# public internet, behind the admin gate".
+AGENT_UPSTREAM = os.environ.get("PREVIEW_AGENT_UPSTREAM", "").strip().rstrip("/")
+AGENT_ENABLED = bool(AGENT_HOST and AGENT_UPSTREAM)
+
+
 # --- The app gallery (registry.py, screenshots.py, home.py) ---------------
 # Where the "what preview sites exist" registry and their screenshots live. Mount
 # a volume here or the gallery empties on every container replacement.

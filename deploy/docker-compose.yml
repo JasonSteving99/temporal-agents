@@ -27,6 +27,9 @@ services:
     restart: unless-stopped
 
   # FastAPI API + browser UI (the dist ships inside the harness wheel). This is the site you open.
+  # Port 3010 has NO auth of its own — keep it on a private network (firewall/Tailscale). To reach it
+  # from the public internet, set PREVIEW_AGENT_UPSTREAM=http://server:8000 in .env, which publishes
+  # it through the preview proxy at https://agent.$PREVIEW_BASE_DOMAIN/ behind the admin-only gate.
   server:
     image: *image
     command:

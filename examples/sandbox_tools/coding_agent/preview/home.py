@@ -23,7 +23,7 @@ import os
 
 from aiohttp import web
 
-from .config import AUTH_HOST, PREVIEW_BASE_DOMAIN
+from .config import AGENT_ENABLED, AGENT_HOST, AUTH_HOST, PREVIEW_BASE_DOMAIN
 from .pages import HOME_PAGE
 from .registry import registry
 from .screenshots import screenshotter, shot_path
@@ -34,9 +34,13 @@ async def home_page(request: web.Request) -> web.Response:
     """The gallery. Callers must have already established this is the login host."""
     if not is_authed(request):
         return redirect_to_login(request)
+    admin = is_admin(request)
+    # Only admins can use the agent, so only they are shown the way to it.
+    agent_url = f"https://{AGENT_HOST}/" if (admin and AGENT_ENABLED) else ""
     body = (
         HOME_PAGE.replace("__APPS__", json.dumps(registry.list()))
-        .replace("__IS_ADMIN__", "true" if is_admin(request) else "false")
+        .replace("__AGENT_URL__", json.dumps(agent_url))
+        .replace("__IS_ADMIN__", "true" if admin else "false")
         .replace("__BASE__", json.dumps(PREVIEW_BASE_DOMAIN))
         # json.dumps, not html.escape: this lands in an HTML text node, and dumps
         # gives us a quoted string whose contents can't close the surrounding tag.

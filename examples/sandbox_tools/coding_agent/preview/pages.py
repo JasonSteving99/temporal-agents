@@ -207,7 +207,7 @@ HOME_PAGE = """<!doctype html>
 <body><div class="wrap">
   <header>
     <h1>Preview gallery</h1>
-    <span id="admin-slot"></span>
+    <span id="admin-slot" style="display:flex;gap:8px"></span>
     <a class="btn" href="/__auth/logout">Sign out</a>
   </header>
   <p class="sub">Every site the agent has served, across sessions. Signed in as __EMAIL__.</p>
@@ -222,12 +222,19 @@ HOME_PAGE = """<!doctype html>
 </div>
 <script>
 const APPS = __APPS__, IS_ADMIN = __IS_ADMIN__, BASE = __BASE__;
+const AGENT_URL = __AGENT_URL__;   // admins only; "" when the agent isn't exposed
 const grid = document.getElementById("grid"), msg = document.getElementById("msg");
 
+const slot = document.getElementById("admin-slot");
+if (AGENT_URL) {
+  const a = document.createElement("a");
+  a.className = "btn primary"; a.href = AGENT_URL; a.textContent = "Open agent";
+  slot.appendChild(a);
+}
 if (IS_ADMIN) {
   const a = document.createElement("a");
   a.className = "btn"; a.href = "/__auth/admin"; a.textContent = "Manage access";
-  document.getElementById("admin-slot").appendChild(a);
+  slot.appendChild(a);
 }
 
 function ago(ts) {
@@ -332,4 +339,28 @@ async function post(url, key, btn, pending) {
 
 render(APPS);
 </script></body></html>
+"""
+
+
+# Shown to someone who IS signed in but is not an admin and asked for the agent
+# app. Deliberately not a redirect to sign-in: they're already signed in, so that
+# would just bounce them back here forever.
+DENIED_PAGE = """<!doctype html>
+<html><head><meta charset="utf-8"><title>Admins only</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  body{font:16px/1.5 system-ui,sans-serif;display:grid;place-items:center;
+       min-height:100vh;margin:0;background:#0b0d10;color:#e6e8eb}
+  .card{background:#14171c;border:1px solid #262b33;border-radius:12px;
+        padding:32px;max-width:420px;text-align:center}
+  h1{font-size:19px;margin:0 0 8px}
+  p{color:#98a2b3;margin:0 0 20px;font-size:14px}
+  a{color:#60a5fa}
+</style></head>
+<body><div class="card">
+  <h1>Admins only</h1>
+  <p>You're signed in, but running the agent is restricted to administrators.
+     Preview sites are still open to you.</p>
+  <p><a href="/">Back to the gallery</a></p>
+</div></body></html>
 """
