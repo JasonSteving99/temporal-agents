@@ -59,7 +59,7 @@ full rewrites, `edit` for surgical changes.
 - VERIFY when it's cheap: run the build or tests via `bash` after a change."""
 
 # Only offered when a preview domain is configured (PREVIEW_BASE_DOMAIN). Routing is by SUBDOMAIN
-# (see preview_proxy.py), so the site is served at the ROOT of its own subdomain and behaves like a
+# (see preview/proxy.py), so the site is served at the ROOT of its own subdomain and behaves like a
 # normal website — no <base href> / relative-path constraints. The agent fills in the sandbox id and
 # the port it chose; the domain is baked in from config.
 _PREVIEW_INSTRUCTION = f"""

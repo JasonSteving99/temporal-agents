@@ -28,14 +28,14 @@ from examples.coding_agent_common import tool_impls
 # in this plain (non-workflow) module: workflow.py imports it via `imports_passed_through()`, so the
 # value is resolved once in the real worker process and never read from inside the Temporal workflow
 # sandbox (where env access is non-deterministic). Empty if previews aren't configured — the agent's
-# system instruction then omits the preview steps. See preview_proxy.py for the routing.
+# system instruction then omits the preview steps. See preview/proxy.py for the routing.
 PREVIEW_BASE_DOMAIN = os.environ.get("PREVIEW_BASE_DOMAIN", "").strip().lower()
 
 # The project the agent works on lives HERE, inside the sandbox (created by the Dockerfile). Starts
 # empty — the agent scaffolds a project from scratch. The live-preview supervisor runs whatever the
 # agent writes to start.sh IN THIS DIR (supervise.sh's START_FILE = <PROJECT_ROOT>/start.sh — it must
 # be under the project root so the confined `write` tool can create it), so the agent can build a web
-# app here and serve it for the preview proxy (see preview_proxy.py / supervise.sh).
+# app here and serve it for the preview proxy (see preview/ and supervise.sh).
 PROJECT_ROOT = Path("/home/daytona/project")
 
 # The ONE place this agent's sandbox backend is chosen (never the tools themselves). Runs on a real

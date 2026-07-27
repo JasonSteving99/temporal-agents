@@ -1,67 +1,39 @@
 """
-Daytona custom preview proxy for the sandboxed coding agent — SUBDOMAIN routing.
+The proxying itself: parse the Host header into a sandbox, wake it if it's
+stopped, wait for its server to bind, then forward the request unchanged.
 
-Purpose: sit in front of Daytona's preview endpoint so a stopped CONTAINER
-sandbox is woken on demand and the server (relaunched by the snapshot's
-supervise.sh entrypoint) is actually listening before we forward. That
-start-and-wait gate is what makes a stopped-then-woken sandbox serve traffic
-seamlessly, so you can build a web app inside the sandbox via the chat agent and
-preview it live.
-
-Routing is by SUBDOMAIN (parsed from the Host header), not by path:
-
-    https://<sandboxId>-<port>.<PREVIEW_BASE_DOMAIN>/<path...>?<query>
-
-e.g. https://abc123-3000.preview.example.com/assets/app.js . The leftmost DNS
-label encodes the target: `<sandboxId>-<port>` (split on the LAST hyphen, since
-Daytona ids may contain hyphens and the port is always the trailing number).
-The request path is forwarded UNCHANGED to the sandbox, so a site that
-references absolute roots (`/assets/app.js`, `/style.css`) works exactly as it
-would when served normally — no `<base href>`, no relative-path gymnastics, no
-prefix rewriting. That's the whole reason for subdomain routing.
-
-Deployment (see deploy/README.md): point a WILDCARD DNS record
-`*.<PREVIEW_BASE_DOMAIN>` at the host, and run a reverse proxy (Caddy/Traefik/
-nginx) that terminates TLS per-subdomain (Caddy `on_demand_tls`, gated by the
-`GET /check` route below) and forwards to this proxy PRESERVING the Host
-header. This proxy itself speaks plain HTTP and only reads Host.
-
-This is deliberately SELF-CONTAINED to the example: it is its own aiohttp server
-and touches nothing in `temporal_agent_harness.web`. It is a teaching skeleton,
-not production code — start from the official samples for anything real:
-https://github.com/daytonaio/daytona-proxy-samples
-
-Env:   DAYTONA_API_KEY (required); PREVIEW_BASE_DOMAIN (required, e.g.
-       "preview.example.com"); DAYTONA_TARGET (optional region, e.g. "us");
-       PREVIEW_PROXY_PORT (optional, default 8080).
+Also home to the Caddy `on_demand_tls` check, which decides which hostnames are
+worth issuing a certificate for.
 """
 
 import asyncio
-import os
 
-from aiohttp import ClientSession, ClientTimeout, WSMsgType, web
+from aiohttp import ClientSession, WSMsgType, web
+from daytona import AsyncDaytona, DaytonaConfig, SandboxState
 from yarl import URL
 
-from daytona import AsyncDaytona, DaytonaConfig, SandboxState
+from .config import (
+    AUTH_ENABLED,
+    AUTH_HOST,
+    AUTO_STOP_MINUTES,
+    DAYTONA_API_KEY,
+    DAYTONA_TARGET,
+    PREVIEW_BASE_DOMAIN,
+)
+from .session import is_authed, redirect_to_login
 
 
 def _make_daytona() -> AsyncDaytona:
     # One shared client for the whole process. The async client opens a single
     # state-streaming websocket that all sandboxes share, so do NOT construct one
     # per request — build it once and close it on shutdown.
-    kwargs = {"api_key": os.environ["DAYTONA_API_KEY"]}
-    target = os.environ.get("DAYTONA_TARGET")  # e.g. "us" — omit to use org default
-    if target:
-        kwargs["target"] = target
+    kwargs = {"api_key": DAYTONA_API_KEY}
+    if DAYTONA_TARGET:
+        kwargs["target"] = DAYTONA_TARGET
     return AsyncDaytona(DaytonaConfig(**kwargs))
 
 
 daytona = _make_daytona()
-
-# The base domain preview subdomains hang off of, e.g. "preview.example.com". A request to
-# "<sandboxId>-<port>.<this>" is routed to that sandbox's port. Required — with it unset every
-# request just gets the help page (there's nothing to parse a sandbox out of).
-PREVIEW_BASE_DOMAIN = os.environ.get("PREVIEW_BASE_DOMAIN", "").strip().lower()
 
 # Headers that must not be blindly copied through a proxy.
 HOP_BY_HOP = {
@@ -73,13 +45,6 @@ HOP_BY_HOP = {
 #   22222 = web terminal, 2280 = toolbox, 33333 = recording dashboard.
 RESERVED_PORTS = {22222, 2280, 33333}
 
-# Idle cost cap. Without this, a woken sandbox keeps billing for compute until
-# something else stops it — and preview traffic alone never will. So the proxy
-# tells Daytona to auto-stop the sandbox after this many idle minutes. This is a
-# PROXY-scoped concern on purpose: the harness that CREATES the sandbox is left
-# untouched. Set 0 to leave the sandbox's auto-stop as-is (don't manage it).
-AUTO_STOP_MINUTES = int(os.environ.get("PREVIEW_AUTO_STOP_MINUTES", "3"))
-
 # Sandbox ids we've already applied AUTO_STOP_MINUTES to. Daytona persists the
 # setting on the sandbox, so once per id is enough; setting it on every request
 # would add a needless API round-trip. A restarted proxy just re-applies on the
@@ -88,9 +53,9 @@ _autostop_configured: set[str] = set()
 
 
 # ---------------------------------------------------------------------------
-# 0. Host parsing: pull (sandbox_id, port) out of the Host header. Returns None
-#    for anything that isn't a "<sandboxId>-<port>.<PREVIEW_BASE_DOMAIN>" host
-#    (the bare base domain, an IP, a stray Host) — those get the help page.
+# Host parsing: pull (sandbox_id, port) out of the Host header. Returns None
+# for anything that isn't a "<sandboxId>-<port>.<PREVIEW_BASE_DOMAIN>" host
+# (the bare base domain, an IP, a stray Host) — those get the help page.
 # ---------------------------------------------------------------------------
 def parse_preview_host(host_header: str) -> "tuple[str, int] | None":
     if not PREVIEW_BASE_DOMAIN or not host_header:
@@ -116,9 +81,9 @@ def parse_preview_host(host_header: str) -> "tuple[str, int] | None":
 
 
 # ---------------------------------------------------------------------------
-# 1. Readiness gate: after the sandbox reports "started", the server inside it
-#    still needs a moment to bind the port. Poll until it answers, or we 503.
-#    We probe THROUGH Daytona's preview URL so we test the real path.
+# Readiness gate: after the sandbox reports "started", the server inside it
+# still needs a moment to bind the port. Poll until it answers, or we 503.
+# We probe THROUGH Daytona's preview URL so we test the real path.
 # ---------------------------------------------------------------------------
 async def wait_for_server(
     session: ClientSession, url: str, token: str, timeout: float = 30.0
@@ -143,10 +108,10 @@ async def wait_for_server(
 
 
 # ---------------------------------------------------------------------------
-# 2. Wake the sandbox if needed, then get a FRESH preview link + token.
-#    Order matters: a standard preview token is invalidated when the sandbox
-#    restarts, so a token cached from before the stop is dead. Fetch it AFTER
-#    start(). get_preview_link also auto-opens the port if it's closed.
+# Wake the sandbox if needed, then get a FRESH preview link + token.
+# Order matters: a standard preview token is invalidated when the sandbox
+# restarts, so a token cached from before the stop is dead. Fetch it AFTER
+# start(). get_preview_link also auto-opens the port if it's closed.
 # ---------------------------------------------------------------------------
 async def ensure_ready(sandbox_id: str, port: int, session: ClientSession):
     sandbox = await daytona.get(sandbox_id)
@@ -170,8 +135,8 @@ async def ensure_ready(sandbox_id: str, port: int, session: ClientSession):
 
 
 # ---------------------------------------------------------------------------
-# 3. Rebuild the upstream URL. The path is forwarded UNCHANGED (subdomain
-#    routing means there's no prefix to strip) so absolute asset paths just work.
+# Rebuild the upstream URL. The path is forwarded UNCHANGED (subdomain
+# routing means there's no prefix to strip) so absolute asset paths just work.
 # ---------------------------------------------------------------------------
 def upstream_url(preview_url: str, path: str, query: "URL") -> URL:
     base = URL(preview_url)
@@ -179,9 +144,9 @@ def upstream_url(preview_url: str, path: str, query: "URL") -> URL:
 
 
 # ---------------------------------------------------------------------------
-# 4. WebSocket passthrough (HMR, live reload). Daytona auto-detects the upgrade
-#    and skips its warning page; we just bridge client <-> upstream and carry
-#    the token + forwarded host.
+# WebSocket passthrough (HMR, live reload). Daytona auto-detects the upgrade
+# and skips its warning page; we just bridge client <-> upstream and carry
+# the token + forwarded host.
 # ---------------------------------------------------------------------------
 async def proxy_ws(request, sandbox_id, port, path, session):
     try:
@@ -223,11 +188,10 @@ async def proxy_ws(request, sandbox_id, port, path, session):
 
 
 # ---------------------------------------------------------------------------
-# 5. Main handler: parse Host -> (help page if not a preview host) -> (ws?) ->
-#    ensure ready -> forward the request path unchanged.
+# Main handler: parse Host -> (help page if not a preview host) -> auth gate ->
+# (ws?) -> ensure ready -> forward the request path unchanged.
 # ---------------------------------------------------------------------------
 async def handler(request: web.Request):
-    # 5a. YOUR auth would go here. This demo proxy is intentionally open.
     session: ClientSession = request.app["session"]
 
     route = parse_preview_host(request.host)
@@ -237,6 +201,13 @@ async def handler(request: web.Request):
 
     if port in RESERVED_PORTS:
         return web.Response(status=403, text=f"Port {port} is reserved by Daytona.")
+
+    # The auth gate (session.py). Checked BEFORE we wake anything: an unauthenticated
+    # scanner must not be able to spin up sandboxes, let alone read them.
+    if not is_authed(request):
+        if request.headers.get("Upgrade", "").lower() == "websocket":
+            return web.Response(status=401, text="not signed in")  # a WS can't follow a 302
+        return redirect_to_login(request)
 
     path = request.rel_url.path
 
@@ -278,7 +249,7 @@ async def handler(request: web.Request):
 
 
 # ---------------------------------------------------------------------------
-# 5b. Caddy `on_demand_tls` gate: https://caddyserver.com/docs/caddyfile/options#on-demand-tls
+# Caddy `on_demand_tls` gate: https://caddyserver.com/docs/caddyfile/options#on-demand-tls
 #     Caddy calls this BEFORE issuing/renewing a cert for a hostname it doesn't already have
 #     one for, as `GET /check?domain=<hostname>`, and only proceeds on a 2xx. Caddy does no
 #     rate limiting of its own here, so this is the only thing standing between a public
@@ -286,7 +257,12 @@ async def handler(request: web.Request):
 #     subdomains — a non-2xx must be the default for anything that isn't a live sandbox.
 # ---------------------------------------------------------------------------
 async def check(request: web.Request) -> web.Response:
-    route = parse_preview_host(request.query.get("domain", ""))
+    domain = request.query.get("domain", "").strip().lower()
+    # The sign-in host is a real site we serve, so Caddy must be allowed a cert for
+    # it — without this, login.<base> is unreachable and nobody can get past the gate.
+    if AUTH_ENABLED and domain == AUTH_HOST:
+        return web.Response(status=200)
+    route = parse_preview_host(domain)
     if route is None:
         return web.Response(status=403)
     sandbox_id, port = route
@@ -300,8 +276,8 @@ async def check(request: web.Request) -> web.Response:
 
 
 # ---------------------------------------------------------------------------
-# 6. Help page for the bare base domain (or any non-preview host). No sandbox
-#    picker (routing is host-in-the-URL by design) — just usage text.
+# Help page for the bare base domain (or any non-preview host). No sandbox
+# picker (routing is host-in-the-URL by design) — just usage text.
 # ---------------------------------------------------------------------------
 async def index(request: web.Request):
     base = PREVIEW_BASE_DOMAIN or "&lt;PREVIEW_BASE_DOMAIN unset&gt;"
@@ -314,32 +290,3 @@ async def index(request: web.Request):
             "<code>$DAYTONA_SANDBOX_ID</code> inside the sandbox.</p>"
         ),
     )
-
-
-# ---------------------------------------------------------------------------
-# 7. App wiring: shared HTTP session + SDK lifecycle.
-# ---------------------------------------------------------------------------
-async def on_startup(app):
-    app["session"] = ClientSession(timeout=ClientTimeout(total=None))
-
-
-async def on_cleanup(app):
-    await app["session"].close()
-    await daytona.close()   # closes the SDK's shared state-streaming websocket
-
-
-def build_app() -> web.Application:
-    app = web.Application()
-    app.on_startup.append(on_startup)
-    app.on_cleanup.append(on_cleanup)
-    # Must be added BEFORE the catch-all below: aiohttp's UrlDispatcher.resolve() matches
-    # resources in registration order, and the catch-all's "/{tail:.*}" would otherwise
-    # swallow "/check" too (it matches on path only, same as every other request path).
-    app.router.add_get("/check", check)
-    # Catch-all: Host decides the sandbox, the path is forwarded verbatim.
-    app.router.add_route("*", "/{tail:.*}", handler)
-    return app
-
-
-if __name__ == "__main__":
-    web.run_app(build_app(), port=int(os.environ.get("PREVIEW_PROXY_PORT", "8080")))

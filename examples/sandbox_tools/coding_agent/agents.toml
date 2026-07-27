@@ -13,5 +13,5 @@ description = """
 A Gemini coding agent whose tools (bash/read/write/edit/grep/glob) run INSIDE a Daytona cloud
 sandbox (@agent.activity_tool_defn(sandboxed=True)), on a project that lives in the box. Mutating
 tools pause for your approval. Ask it to build a web app and it can serve it for live preview (see
-preview_proxy.py). Needs GEMINI_API_KEY, DAYTONA_API_KEY, and a prebuilt snapshot (`just
+preview/ package). Needs GEMINI_API_KEY, DAYTONA_API_KEY, and a prebuilt snapshot (`just
 build-sandbox`)."""

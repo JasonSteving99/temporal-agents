@@ -19,7 +19,7 @@ dependencies = [
     # (renamed to a public `interactions.py`) in later releases — 2.14.0 breaks import. 2.8.0 is what
     # upstream's own lock pinned, so it's the known-good version.
     "google-genai==2.8.0",
-    # preview_proxy.py imports aiohttp directly (the upstream justfile injected it ad-hoc via
+    # the preview/ package imports aiohttp directly (the upstream justfile injected it ad-hoc via
     # `uv run --with aiohttp`); declare it so it's baked into the image.
     "aiohttp>=3.9",
 ]

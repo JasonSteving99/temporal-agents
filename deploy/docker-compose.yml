@@ -61,12 +61,20 @@ services:
   # port, so previewed sites work like normal sites (absolute asset paths, client routing). Put a
   # reverse proxy in front that terminates wildcard TLS for *.$PREVIEW_BASE_DOMAIN and forwards here
   # PRESERVING the Host header (see README). Standalone — needs DAYTONA_API_KEY only, no Temporal.
-  # NOTE: no auth (see README).
+  # Previews are gated by Firebase Google sign-in once FIREBASE_API_KEY is set in .env; with it
+  # blank, previews are open to anyone. Admins (PREVIEW_ADMIN_EMAILS) manage who else gets in from
+  # the panel at https://login.$PREVIEW_BASE_DOMAIN/__auth/admin (see README).
   preview-proxy:
     image: *image
-    command: ["python", "-m", "examples.sandbox_tools.coding_agent.preview_proxy"]
+    command: ["python", "-m", "examples.sandbox_tools.coding_agent.preview"]
     env_file: [.env]
     ports: ["3011:8080"]   # host 3011 -> container 8080
+    volumes:
+      # The guest allowlist the admin panel edits. MUST be a volume: it's written at
+      # runtime, so without this it would reset to empty on every `docker compose pull`.
+      # Admins are NOT in here — they come from PREVIEW_ADMIN_EMAILS in .env, so nothing
+      # reachable over HTTP can grant admin.
+      - preview-auth:/data/preview-auth
     restart: unless-stopped
 
   # Housekeeping: the large-payload offload driver never deletes what it writes (files are keyed by
@@ -108,6 +116,12 @@ services:
     restart: "no"
 
 volumes:
+  # Who may view previews, as edited live from the admin panel. Tiny (a JSON array of
+  # emails) but must persist across container replacement, or you'd re-add everyone
+  # after each update. Back it up with:
+  #   docker run --rm -v coding-agent_preview-auth:/d alpine cat /d/allowed_emails.json
+  preview-auth:
+
   # Docker-managed named volume for Temporal large-payload offload (LARGE_PAYLOAD_DRIVER=local) —
   # Docker owns the storage, you never touch a host path. Correct for a single host; use S3
   # (LARGE_PAYLOAD_DRIVER=s3) if you ever split these across machines. The payload-gc sidecar keeps

@@ -94,7 +94,7 @@ limiting of its own, so without it, scanners hitting random subdomains will burn
 Let's Encrypt quota for the domain within the hour and get it rate-limited for a week.
 
 The preview proxy already knows which sandboxes exist, so it exposes the `ask` check itself at
-`GET /check?domain=<hostname>` — see `check()` in `preview_proxy.py`. It parses the hostname the
+`GET /check?domain=<hostname>` — see `check()` in `preview/proxy.py`. It parses the hostname the
 same way the main handler does and returns `200` only if that sandbox id actually exists (`403`
 otherwise), so Caddy only issues certs for real, live sandboxes:
 
@@ -116,6 +116,60 @@ otherwise), so Caddy only issues certs for real, live sandboxes:
 The FastAPI server (`3010`) is a normal single-host site — front it however you like (e.g.
 `agent.example.com → localhost:3010`).
 
+## Preview auth (Firebase)
+
+Previews are gated by a Google sign-in, so agent-built sites aren't readable by anyone who guesses a
+sandbox subdomain. Set `FIREBASE_API_KEY` in `.env` to turn the gate on (blank = previews open to
+all). Setup, once:
+
+1. **Firebase Console → Authentication → Sign-in method:** enable the **Google** provider.
+2. **→ Settings → Authorized domains:** add `login.<PREVIEW_BASE_DOMAIN>`. That single host is the
+   only origin sign-in ever runs on — it needs no DNS or Caddy changes, since the wildcard record and
+   the `*.<PREVIEW_BASE_DOMAIN>` block already cover it, and `/check` returns `200` for it so Caddy
+   will issue its cert.
+3. **→ Project settings → Your apps → SDK setup and configuration:** copy `apiKey`, `authDomain` and
+   `projectId` into `FIREBASE_API_KEY` / `FIREBASE_AUTH_DOMAIN` / `FIREBASE_PROJECT_ID`.
+4. Set **`PREVIEW_ADMIN_EMAILS`** to your own email. This is not optional — Google sign-in accepts
+   *any* Google account, so the allowlist is what actually keeps strangers out, and with no admins
+   and no guests nobody gets in at all.
+5. Set `PREVIEW_SESSION_SECRET` (`openssl rand -hex 32`), or sessions die on each proxy restart.
+
+### Adding people
+
+Sign in and open **`https://login.<PREVIEW_BASE_DOMAIN>/__auth/admin`**. Add or remove guests there
+and it takes effect immediately — no restart, no redeploy, no editing `.env`. The list is stored as
+JSON on the `preview-auth` Docker volume.
+
+Access comes in two tiers, and they are stored in two different places on purpose:
+
+| | Where it lives | Who can change it | What it grants |
+|---|---|---|---|
+| **Admins** | `PREVIEW_ADMIN_EMAILS` in `.env` | shell access to the host, then a restart | previews **+** the admin panel |
+| **Guests** | JSON on the `preview-auth` volume | any admin, live from the panel | previews only |
+
+That split is the security property: **nothing reachable over HTTP can create an admin.** The panel
+writes only the guest file, so even a bug that exposed it could hand out preview access, never admin
+— and your friends can't promote themselves or each other. There is deliberately no "make admin"
+button; adding one would collapse the two tiers back into one.
+
+Other things worth knowing:
+
+- The allowlist is re-checked on **every request**, so removing a guest cuts off their existing
+  session on their next click — you don't wait out their 7-day cookie.
+- To non-admins the panel returns **404, not 403**, so a signed-in friend poking at URLs gets no
+  hint that it exists.
+- Admins are always allowed in, so you can't lock yourself out by clearing the guest list.
+- A missing or corrupt guest file means *no guests*, never *everyone* — and since admins come from
+  the environment, you can always still sign in and repair it.
+- You can also edit the JSON on the host directly; the proxy notices the change without a restart.
+
+How sign-in works: an unauthenticated request to any `<sandboxId>-<port>` subdomain is redirected to
+`https://login.<PREVIEW_BASE_DOMAIN>/__auth/login`, which signs in with Firebase and posts the ID
+token back. The proxy verifies that token against Google's Identity Toolkit (no service-account key
+needed), checks the allowlist, and sets an HMAC-signed `HttpOnly` cookie scoped to
+`<PREVIEW_BASE_DOMAIN>` — so one sign-in covers every sandbox subdomain and steady-state requests
+cost no extra network calls. `/__auth/logout` clears it. See `preview/session.py`.
+
 Update to a newer image:
 
 ```bash
@@ -124,8 +178,10 @@ docker compose pull && docker compose up -d
 
 ## Security notes (read before exposing this)
 
-- **The preview proxy has no auth** and both `3010`/`3011` bind publicly. Put them behind a firewall
-  and a reverse proxy with TLS + your own auth before real use.
+- **The preview proxy is only gated if you configure it** — see [Preview auth](#preview-auth-firebase).
+  With `FIREBASE_API_KEY` blank, every preview is world-readable to anyone who guesses a subdomain.
+- **The FastAPI server (`3010`) still has no auth of its own**, and both `3010`/`3011` bind publicly.
+  Put them behind a firewall and a reverse proxy with TLS + your own auth before real use.
 - Secrets live in `.env` / `temporal.toml` on the host — keep them `chmod 600` and off version control
   (already gitignored).
 

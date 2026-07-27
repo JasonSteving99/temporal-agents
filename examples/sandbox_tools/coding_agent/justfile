@@ -75,4 +75,4 @@ build-sandbox:
 # touches nothing in the harness web app. aiohttp is injected with uv (`--with`); `daytona` comes from
 # the `sandbox` extra. Needs DAYTONA_API_KEY (and optionally DAYTONA_TARGET) in the .env.local.
 preview-proxy:
-    cd "{{ root }}" && uv run --extra sandbox --with aiohttp python -m examples.sandbox_tools.coding_agent.preview_proxy
+    cd "{{ root }}" && uv run --extra sandbox --with aiohttp python -m examples.sandbox_tools.coding_agent.preview

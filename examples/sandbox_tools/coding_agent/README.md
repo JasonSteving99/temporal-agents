@@ -75,8 +75,10 @@ project dir and gives you a preview URL.
 
 ## Live preview
 
-`preview_proxy.py` is a small, self-contained aiohttp server (it touches nothing in the harness web
-app) that lets you open a server the agent started inside the sandbox:
+The `preview/` package is a small, self-contained aiohttp server (it touches nothing in the harness
+web app) that lets you open a server the agent started inside the sandbox. Its `__init__.py` has a
+map of the modules; `preview/proxy.py` is the request path and `preview/allowlist.py` is the access
+model. It works like this:
 
 1. **The snapshot entrypoint (`supervise.sh`)** is a keepalive that watches
    `/home/daytona/project/start.sh` (inside the project dir, so the agent's `write` tool can create
