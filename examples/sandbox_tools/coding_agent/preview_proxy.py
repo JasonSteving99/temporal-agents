@@ -22,8 +22,9 @@ prefix rewriting. That's the whole reason for subdomain routing.
 
 Deployment (see deploy/README.md): point a WILDCARD DNS record
 `*.<PREVIEW_BASE_DOMAIN>` at the host, and run a reverse proxy (Caddy/Traefik/
-nginx) that terminates wildcard TLS and forwards to this proxy PRESERVING the
-Host header. This proxy itself speaks plain HTTP and only reads Host.
+nginx) that terminates TLS per-subdomain (Caddy `on_demand_tls`, gated by the
+`GET /check` route below) and forwards to this proxy PRESERVING the Host
+header. This proxy itself speaks plain HTTP and only reads Host.
 
 This is deliberately SELF-CONTAINED to the example: it is its own aiohttp server
 and touches nothing in `temporal_agent_harness.web`. It is a teaching skeleton,
@@ -277,6 +278,28 @@ async def handler(request: web.Request):
 
 
 # ---------------------------------------------------------------------------
+# 5b. Caddy `on_demand_tls` gate: https://caddyserver.com/docs/caddyfile/options#on-demand-tls
+#     Caddy calls this BEFORE issuing/renewing a cert for a hostname it doesn't already have
+#     one for, as `GET /check?domain=<hostname>`, and only proceeds on a 2xx. Caddy does no
+#     rate limiting of its own here, so this is the only thing standing between a public
+#     wildcard preview domain and burning the ACME weekly cert quota on scanner-guessed
+#     subdomains — a non-2xx must be the default for anything that isn't a live sandbox.
+# ---------------------------------------------------------------------------
+async def check(request: web.Request) -> web.Response:
+    route = parse_preview_host(request.query.get("domain", ""))
+    if route is None:
+        return web.Response(status=403)
+    sandbox_id, port = route
+    if port in RESERVED_PORTS:
+        return web.Response(status=403)
+    try:
+        await daytona.get(sandbox_id)   # raises if the sandbox id doesn't exist
+    except Exception:
+        return web.Response(status=403)
+    return web.Response(status=200)
+
+
+# ---------------------------------------------------------------------------
 # 6. Help page for the bare base domain (or any non-preview host). No sandbox
 #    picker (routing is host-in-the-URL by design) — just usage text.
 # ---------------------------------------------------------------------------
@@ -309,7 +332,11 @@ def build_app() -> web.Application:
     app = web.Application()
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
-    # One catch-all: Host decides the sandbox, the path is forwarded verbatim.
+    # Must be added BEFORE the catch-all below: aiohttp's UrlDispatcher.resolve() matches
+    # resources in registration order, and the catch-all's "/{tail:.*}" would otherwise
+    # swallow "/check" too (it matches on path only, same as every other request path).
+    app.router.add_get("/check", check)
+    # Catch-all: Host decides the sandbox, the path is forwarded verbatim.
     app.router.add_route("*", "/{tail:.*}", handler)
     return app
 

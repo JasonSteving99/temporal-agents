@@ -80,18 +80,34 @@ forwarded to that sandbox's port, path untouched — so previewed sites work lik
 subpath prefix, no `<base href>`). To make that reachable:
 
 1. **Wildcard DNS:** add an `A`/`AAAA` record for `*.<PREVIEW_BASE_DOMAIN>` pointing at this host.
-2. **Wildcard TLS + Host passthrough:** run a reverse proxy in front of the preview proxy (host port
-   `3011`) that terminates TLS for `*.<PREVIEW_BASE_DOMAIN>` and forwards the Host header unchanged.
-   A single-label wildcard cert (`*.preview.example.com`) is why sandboxId+port share one label
-   (`<sandboxId>-<port>`) rather than separate dotted labels.
+2. **Per-subdomain TLS + Host passthrough:** run a reverse proxy in front of the preview proxy (host
+   port `3011`) that terminates TLS and forwards the Host header unchanged. A single-label domain
+   pattern (`*.preview.example.com`) is why sandboxId+port share one label (`<sandboxId>-<port>`)
+   rather than separate dotted labels.
 
-[Caddy](https://caddyserver.com) makes the wildcard cert painless (needs a DNS-provider plugin for
-the ACME DNS-01 challenge). Minimal `Caddyfile`:
+[Caddy](https://caddyserver.com)'s `on_demand_tls` fits this better than a wildcard cert: sandbox
+subdomains are unbounded and short-lived, so a DNS-01 wildcard cert would cover ids that no longer
+exist, and a fresh per-id cert issued only when actually requested is more targeted anyway.
+`on_demand_tls` issues a normal (non-wildcard) cert the first time each unique `<sandboxId>-<port>`
+host is requested, gated by an `ask` callback — **required**, not optional: Caddy applies no rate
+limiting of its own, so without it, scanners hitting random subdomains will burn your ~50/week
+Let's Encrypt quota for the domain within the hour and get it rate-limited for a week.
+
+The preview proxy already knows which sandboxes exist, so it exposes the `ask` check itself at
+`GET /check?domain=<hostname>` — see `check()` in `preview_proxy.py`. It parses the hostname the
+same way the main handler does and returns `200` only if that sandbox id actually exists (`403`
+otherwise), so Caddy only issues certs for real, live sandboxes:
 
 ```caddy
+{
+    on_demand_tls {
+        ask http://localhost:3011/check
+    }
+}
+
 *.preview.example.com {
     tls {
-        dns <your-dns-provider> <credentials>   # e.g. cloudflare {env.CF_API_TOKEN}
+        on_demand
     }
     reverse_proxy localhost:3011                 # the preview-proxy service; Host is preserved
 }

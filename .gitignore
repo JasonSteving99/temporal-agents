@@ -14,6 +14,7 @@ htmlcov/
 
 .env
 .env.local
+**/temporal.cloud.toml
 
 # Private Temporal connection profiles (e.g. Temporal Cloud creds / api_key). Copy
 # deploy/temporal.cloud.toml.example to deploy/temporal.toml and fill in your credentials.
