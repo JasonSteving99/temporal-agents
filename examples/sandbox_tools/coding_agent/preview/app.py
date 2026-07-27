@@ -6,7 +6,7 @@ Route ORDER is load-bearing — see build_app().
 
 from aiohttp import ClientSession, ClientTimeout, web
 
-from . import auth, home, proxy, screenshots
+from . import auth, home, proxy, pwa, screenshots
 from .registry import registry
 
 
@@ -44,6 +44,13 @@ def build_app() -> web.Application:
     app.router.add_get("/__auth/logout", auth.logout)
     app.router.add_get("/__auth/admin", auth.admin_page)
     app.router.add_post("/__auth/admin/guests", auth.admin_guests)
+
+    # PWA assets: deliberately unauthenticated (pwa.py explains why), and under
+    # /__apps/ rather than the root so they can't shadow a previewed site's own
+    # /sw.js or /manifest.webmanifest.
+    app.router.add_get("/__apps/manifest.webmanifest", pwa.manifest)
+    app.router.add_get("/__apps/sw.js", pwa.service_worker)
+    app.router.add_get("/__apps/static/{name}", pwa.static_asset)
 
     # Gallery routes (home.py). Same dunder-prefix reasoning as /__auth/*. NOTE
     # the gallery page itself is deliberately NOT registered here: it hangs off

@@ -13,16 +13,19 @@ valid JS literal syntax and quotes anything dangerous.
 # domain (see config.AUTH_HOST).
 LOGIN_PAGE = """<!doctype html>
 <html><head><meta charset="utf-8"><title>Sign in</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+__PWA_HEAD__
 <style>
-  body{font:16px/1.5 system-ui,sans-serif;display:grid;place-items:center;
-       min-height:100vh;margin:0;background:#0b0d10;color:#e6e8eb}
+  body{font:16px/1.5 system-ui,-apple-system,sans-serif;display:grid;place-items:center;
+       min-height:100svh;margin:0;padding:20px;background:#0b0d10;color:#e6e8eb;
+       -webkit-text-size-adjust:100%;-webkit-tap-highlight-color:transparent}
   .card{background:#14171c;border:1px solid #262b33;border-radius:12px;
-        padding:32px;max-width:380px;text-align:center}
+        padding:32px 24px;max-width:380px;width:100%;text-align:center}
   h1{font-size:20px;margin:0 0 8px}
   p{color:#98a2b3;margin:0 0 24px;font-size:14px}
-  button{font:inherit;padding:10px 20px;border-radius:8px;border:0;cursor:pointer;
-         background:#3b82f6;color:#fff}
+  button{font:inherit;padding:0 20px;min-height:44px;border-radius:10px;border:0;
+         cursor:pointer;background:#3b82f6;color:#fff;touch-action:manipulation;width:100%}
+  button:active{transform:scale(.98)}
   button:disabled{opacity:.5;cursor:default}
   .err{color:#f87171;font-size:13px;margin-top:16px;min-height:1em}
 </style></head>
@@ -34,25 +37,50 @@ LOGIN_PAGE = """<!doctype html>
 </div>
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-app.js";
-import { getAuth, GoogleAuthProvider, signInWithPopup }
+import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult }
   from "https://www.gstatic.com/firebasejs/12.16.0/firebase-auth.js";
 
 const auth = getAuth(initializeApp(__CONFIG__));
 const NEXT = __NEXT__;
 const go = document.getElementById("go"), err = document.getElementById("err");
 
+// An installed PWA has no browser chrome to host a popup, and mobile Safari
+// blocks them outright, so those paths sign in by full-page redirect instead.
+// The destination has to survive that round trip.
+const standalone = matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+const KEY = "preview:next";
+
+async function exchange(user) {
+  const res = await fetch("/__auth/session", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ idToken: await user.getIdToken(), next: sessionStorage.getItem(KEY) || NEXT }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  sessionStorage.removeItem(KEY);
+  location.href = (await res.json()).redirect;
+}
+
+// Coming back from a redirect sign-in.
+getRedirectResult(auth).then((r) => { if (r && r.user) return exchange(r.user); })
+  .catch((e) => { err.textContent = e.message || String(e); });
+
 go.onclick = async () => {
   go.disabled = true; err.textContent = "";
+  sessionStorage.setItem(KEY, NEXT);
   try {
-    const cred = await signInWithPopup(auth, new GoogleAuthProvider());
-    const res = await fetch("/__auth/session", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ idToken: await cred.user.getIdToken(), next: NEXT }),
-    });
-    if (!res.ok) throw new Error(await res.text());
-    location.href = (await res.json()).redirect;
+    if (standalone) {
+      await signInWithRedirect(auth, new GoogleAuthProvider());
+      return;                                  // navigates away
+    }
+    await exchange((await signInWithPopup(auth, new GoogleAuthProvider())).user);
   } catch (e) {
+    const code = e && e.code || "";
+    if (code === "auth/popup-blocked" || code === "auth/operation-not-supported-in-this-environment"
+        || code === "auth/popup-closed-by-user" && standalone) {
+      await signInWithRedirect(auth, new GoogleAuthProvider());
+      return;
+    }
     err.textContent = e.message || String(e);
     go.disabled = false;
   }
@@ -203,25 +231,46 @@ render(__MEMBERS__);
 # sandbox in the gallery just to look at it, and each wake bills for compute.
 HOME_PAGE = """<!doctype html>
 <html><head><meta charset="utf-8"><title>Preview gallery</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+__PWA_HEAD__
 <style>
   *{box-sizing:border-box}
-  body{font:16px/1.5 system-ui,sans-serif;background:#0b0d10;color:#e6e8eb;margin:0;
-       padding:40px 24px 64px}
+  /* Mobile first: these are the phone values, widened in the media query below. */
+  body{font:16px/1.5 system-ui,-apple-system,sans-serif;background:#0b0d10;color:#e6e8eb;
+       margin:0;padding:20px 16px 48px;
+       padding-left:max(16px,env(safe-area-inset-left));
+       padding-right:max(16px,env(safe-area-inset-right));
+       padding-bottom:max(48px,env(safe-area-inset-bottom));
+       -webkit-text-size-adjust:100%;-webkit-tap-highlight-color:transparent;
+       overscroll-behavior-y:contain}
   .wrap{max-width:1100px;margin:0 auto}
-  header{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:6px}
-  h1{font-size:22px;margin:0;flex:1}
-  .sub{color:#98a2b3;font-size:14px;margin:0 0 28px}
-  .btn{font:inherit;font-size:14px;padding:7px 14px;border-radius:8px;border:1px solid #262b33;
-       cursor:pointer;background:#14171c;color:#e6e8eb;text-decoration:none;display:inline-block}
-  .btn:hover{border-color:#3b4250}
+  header{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px;
+         padding-top:env(safe-area-inset-top)}
+  h1{font-size:19px;margin:0;flex:1;min-width:100%}
+  .sub{color:#98a2b3;font-size:13px;margin:10px 0 20px}
+  /* 44px min target: the iOS/Android tap-size floor. */
+  .btn{font:inherit;font-size:14px;padding:0 14px;min-height:44px;border-radius:10px;
+       border:1px solid #262b33;cursor:pointer;background:#14171c;color:#e6e8eb;
+       text-decoration:none;display:inline-flex;align-items:center;justify-content:center;
+       touch-action:manipulation;user-select:none}
+  .btn:active{transform:scale(.97)}
   .btn.primary{background:#3b82f6;border-color:#3b82f6;color:#fff}
   .btn:disabled{opacity:.5;cursor:default}
-  .grid{display:grid;gap:20px;grid-template-columns:repeat(auto-fill,minmax(300px,1fr))}
+  .grid{display:grid;gap:14px;grid-template-columns:1fr}
+  @media (min-width:560px){
+    body{padding:40px 24px 64px}
+    h1{font-size:22px;min-width:0}
+    .sub{margin:0 0 28px}
+    .grid{gap:20px;grid-template-columns:repeat(auto-fill,minmax(300px,1fr))}
+  }
+  @media (hover:hover){ .btn:hover{border-color:#3b4250} }
   .card{background:#14171c;border:1px solid #262b33;border-radius:12px;overflow:hidden;
         display:flex;flex-direction:column}
   .shot{display:block;width:100%;aspect-ratio:16/10;object-fit:cover;object-position:top center;
         background:#0f1216;border-bottom:1px solid #262b33}
+  .stale{position:fixed;left:50%;transform:translateX(-50%);bottom:max(16px,env(safe-area-inset-bottom));
+         background:#14171c;border:1px solid #3f3722;color:#fbbf24;font-size:13px;
+         padding:10px 16px;border-radius:999px;display:none}
   .noshot{display:grid;place-items:center;color:#4b5563;font-size:13px;text-align:center;padding:16px}
   .meta{padding:14px 16px;flex:1;min-width:0}
   .title{font-size:15px;font-weight:600;margin:0 0 3px;overflow:hidden;text-overflow:ellipsis;
@@ -229,7 +278,8 @@ HOME_PAGE = """<!doctype html>
   .host{font-size:12px;color:#667085;font-family:ui-monospace,monospace;overflow:hidden;
         text-overflow:ellipsis;white-space:nowrap}
   .when{font-size:12px;color:#4b5563;margin-top:6px}
-  .actions{display:flex;gap:8px;padding:0 16px 14px;flex-wrap:wrap}
+  .actions{display:flex;gap:8px;padding:0 14px 14px;flex-wrap:wrap}
+  .actions .btn{flex:1;min-width:90px}
   .empty{border:1px dashed #262b33;border-radius:12px;padding:48px 24px;text-align:center;
          color:#667085}
   .msg{font-size:13px;margin:18px 0 0;min-height:1em;color:#98a2b3}
@@ -246,6 +296,7 @@ HOME_PAGE = """<!doctype html>
   <p class="sub">Every site the agent has served, across sessions. Signed in as __EMAIL__.</p>
   <div class="grid" id="grid"></div>
   <div class="msg" id="msg"></div>
+  <div class="stale" id="stale">Offline — showing the last loaded list</div>
   <p class="note">
     Tiles are screenshots, not live pages — loading the real sites here would wake every
     sandbox and bill for compute. Each shot refreshes automatically when the proxy wakes
@@ -371,6 +422,33 @@ async function post(url, key, btn, pending) {
 }
 
 render(APPS);
+
+// --- PWA -------------------------------------------------------------------
+// The page you are reading was fetched network-first, so APPS is whatever the
+// server just said. Registering the worker only adds an offline fallback and
+// instant screenshots; it never serves you a stale list while online.
+if ("serviceWorker" in navigator) {
+  addEventListener("load", async () => {
+    try {
+      const reg = await navigator.serviceWorker.register("/__apps/sw.js", { scope: "/" });
+      // Check on every load, so a deploy lands on the next launch rather than
+      // whenever the browser next feels like it.
+      reg.update();
+      // A worker that installs while this tab is open has newer markup than the
+      // markup running it; reload once, and only once, to pick it up.
+      let reloading = false;
+      navigator.serviceWorker.addEventListener("controllerchange", () => {
+        if (reloading) return;
+        reloading = true;
+        location.reload();
+      });
+    } catch (e) { /* the gallery works fine without it */ }
+  });
+}
+// Tell the user when what they're looking at came off the shelf.
+if (!navigator.onLine) document.getElementById("stale").style.display = "block";
+addEventListener("offline", () => { document.getElementById("stale").style.display = "block"; });
+addEventListener("online", () => { document.getElementById("stale").style.display = "none"; });
 </script></body></html>
 """
 

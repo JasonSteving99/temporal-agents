@@ -190,6 +190,13 @@ isn't something to memorise.
 Registration is automatic and needs no configuration: whenever the proxy successfully forwards a
 request to a `<sandboxId>-<port>`, it remembers it.
 
+The gallery is an **installable PWA** — add it to your phone's home screen and it opens standalone.
+Its caching is deliberately network-first, so every launch shows the current list rather than a
+snapshot; only screenshots are cached hard, which is safe because they're requested at
+`?v=<shot_at>` and never change under a given URL. Offline, you get the last list you loaded with a
+note saying so. The agent is prompted to build every site it makes the same way: mobile-first,
+installable, with an explicit Install button.
+
 **Tiles are screenshots, never iframes.** An iframe per app would wake every sandbox in the gallery
 just to render the page, and each wake bills for compute. So screenshots are captured only at the
 moments a sandbox is *already* awake and the capture is therefore free:

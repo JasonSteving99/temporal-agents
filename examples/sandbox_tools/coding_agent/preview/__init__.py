@@ -54,6 +54,8 @@ THE MAP — modules bottom-up, each importing only the ones above it:
     pages.py       The three HTML pages (sign-in, admin panel, gallery). Markup only.
     auth.py        HTTP handlers for signing in and for editing the guest list.
     home.py        The gallery and its routes.
+    pwa.py         Manifest, service worker and icons that make the gallery an
+                   installable, always-fresh mobile app.
     proxy.py       The actual proxying: wake the sandbox, wait for its server,
                    forward the request. Plus the Caddy cert-issuance check.
     app.py         Route table + lifecycle. The order routes are added in is

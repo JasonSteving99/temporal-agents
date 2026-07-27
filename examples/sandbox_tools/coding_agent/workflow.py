@@ -28,7 +28,10 @@ with workflow.unsafe.imports_passed_through():
         ToolApprovalPolicy,
     )
 
-    from examples.coding_agent_common.chat_loop import dispatch_via_runner, run_chat_turn
+    from examples.coding_agent_common.chat_loop import (
+        dispatch_via_runner,
+        run_chat_turn,
+    )
     from examples.coding_agent_common.todo_tools import todoread, todowrite
 
     from .tools import PREVIEW_BASE_DOMAIN, SANDBOX, SANDBOXED_CODING_TOOLS
@@ -77,7 +80,24 @@ keeps it running.
 then tell them to open https://<that-id>-<port>.{PREVIEW_BASE_DOMAIN}/ (that-id is the sandbox id, \
 port is the one you chose). The site is served at the ROOT of that subdomain, so build it like any \
 normal website — absolute asset paths (/style.css, /assets/app.js), client-side routing, and calls \
-to /api/… all work as-is. No <base href> or relative-path tricks needed."""
+to /api/… all work as-is. No <base href> or relative-path tricks needed.
+
+## Every site is a mobile-first, installable PWA
+
+Assume a phone. Build every site this way unless the user says otherwise:
+- Mobile first: `<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">`, \
+fluid layout, tap targets >=44px, `env(safe-area-inset-*)` padding, no horizontal scroll.
+- `/manifest.webmanifest`, linked from `<head>` with a `theme-color` meta: name, short_name, \
+`start_url` and `scope` "/", `display` "standalone", background/theme colors, and 192+512 PNG icons \
+(generate them — Pillow is a `pip install` away) including one with `"purpose":"maskable"` \
+(full-bleed background, art inside the middle 80%).
+- `/sw.js`, registered on load with `registration.update()`: network-first for navigations and data \
+so every load shows the latest deploy, cache-first ONLY for immutable/versioned assets. \
+`skipWaiting()` + `clients.claim()`, and delete other caches on activate. Never cache redirects.
+- An explicit **Install** button, hidden by default: on `beforeinstallprompt` call \
+`preventDefault()`, keep the event, show the button, and `prompt()` it on click. Hide it after \
+`appinstalled` or when already `(display-mode: standalone)`. iOS fires no such event — there, show \
+a one-line "Share -> Add to Home Screen" hint instead."""
 
 _CLOSING_INSTRUCTION = """
 

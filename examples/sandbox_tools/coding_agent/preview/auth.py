@@ -46,6 +46,7 @@ from .config import (
     SESSION_TTL,
 )
 from .pages import ADMIN_PAGE, LOGIN_PAGE
+from .pwa import head_tags
 from .session import is_admin, is_authed, make_session, request_email, safe_next
 
 
@@ -66,8 +67,10 @@ async def login_page(request: web.Request) -> web.Response:
         "authDomain": FIREBASE_AUTH_DOMAIN,
         "projectId": FIREBASE_PROJECT_ID,
     }
-    body = LOGIN_PAGE.replace("__CONFIG__", json.dumps(config)).replace(
-        "__NEXT__", json.dumps(nxt)
+    body = (
+        LOGIN_PAGE.replace("__CONFIG__", json.dumps(config))
+        .replace("__NEXT__", json.dumps(nxt))
+        .replace("__PWA_HEAD__", head_tags())
     )
     return web.Response(content_type="text/html", text=body)
 

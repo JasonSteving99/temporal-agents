@@ -25,6 +25,7 @@ from aiohttp import web
 
 from .config import AGENT_ENABLED, AGENT_HOST, AUTH_HOST, PREVIEW_BASE_DOMAIN
 from .pages import HOME_PAGE
+from .pwa import head_tags
 from .registry import registry
 from .screenshots import screenshotter, shot_path
 from .session import (
@@ -52,8 +53,14 @@ async def home_page(request: web.Request) -> web.Response:
         # json.dumps, not html.escape: this lands in an HTML text node, and dumps
         # gives us a quoted string whose contents can't close the surrounding tag.
         .replace("__EMAIL__", json.dumps(request_email(request) or "")[1:-1])
+        .replace("__PWA_HEAD__", head_tags())
     )
-    return web.Response(content_type="text/html", text=body)
+    # no-store, belt to the service worker's network-first braces: the embedded app
+    # list is only as good as the moment it was rendered, so the browser must never
+    # replay this document from its own HTTP cache.
+    return web.Response(
+        content_type="text/html", text=body, headers={"Cache-Control": "no-store"}
+    )
 
 
 async def app_shot(request: web.Request) -> web.Response:
