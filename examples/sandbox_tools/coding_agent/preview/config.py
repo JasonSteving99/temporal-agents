@@ -67,3 +67,18 @@ ALLOWLIST_PATH = os.environ.get(
 )
 
 MAX_GUESTS = 200          # bounds the file; also bounds the panel's DOM
+
+# --- The app gallery (registry.py, screenshots.py, home.py) ---------------
+# Where the "what preview sites exist" registry and their screenshots live. Mount
+# a volume here or the gallery empties on every container replacement.
+APPS_PATH = os.environ.get("PREVIEW_APPS_PATH", "/data/preview-apps/apps.json")
+SHOTS_DIR = os.environ.get("PREVIEW_SHOTS_DIR", "/data/preview-apps/shots")
+MAX_APPS = int(os.environ.get("PREVIEW_MAX_APPS", "300"))
+
+# Screenshots need Playwright + Chromium in the image (see Dockerfile). Set to 0
+# to skip capture entirely and run the gallery on placeholder tiles.
+SCREENSHOTS_ENABLED = os.environ.get("PREVIEW_SCREENSHOTS", "1").strip() not in ("0", "false", "")
+SHOT_WIDTH = int(os.environ.get("PREVIEW_SHOT_WIDTH", "1280"))
+SHOT_HEIGHT = int(os.environ.get("PREVIEW_SHOT_HEIGHT", "800"))
+SHOT_QUALITY = int(os.environ.get("PREVIEW_SHOT_QUALITY", "72"))   # jpeg
+SHOT_TIMEOUT_MS = int(os.environ.get("PREVIEW_SHOT_TIMEOUT_MS", "20000"))

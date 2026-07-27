@@ -26,6 +26,16 @@ RUN uv sync --frozen --no-install-project
 # Put the venv on PATH so `python` is the project interpreter (with the harness, deps, and aiohttp).
 ENV PATH="/app/.venv/bin:$PATH"
 
+# Headless Chromium for the preview gallery's screenshots (preview/screenshots.py). Only the
+# preview-proxy service uses it, but all four share this image, so it's installed once here.
+# `chromium-headless-shell` is Playwright's stripped headless build — a fraction of the full
+# chromium download, since we only ever render a page and grab a jpeg. `--with-deps` pulls the
+# system libraries Chromium needs. Screenshots degrade to placeholder tiles if this layer is
+# removed, so you can drop it to slim the image (also set PREVIEW_SCREENSHOTS=0 to skip the
+# launch attempt entirely).
+RUN playwright install --with-deps chromium-headless-shell \
+    && rm -rf /var/lib/apt/lists/*
+
 # The example source, imported as the `examples.*` namespace package off PYTHONPATH=/app.
 COPY examples/ ./examples/
 

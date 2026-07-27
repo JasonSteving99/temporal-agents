@@ -20,6 +20,8 @@ from .config import (
     DAYTONA_TARGET,
     PREVIEW_BASE_DOMAIN,
 )
+from .registry import app_key, registry
+from .screenshots import schedule_capture
 from .session import is_authed, redirect_to_login
 
 
@@ -114,12 +116,19 @@ async def wait_for_server(
 # start(). get_preview_link also auto-opens the port if it's closed.
 # ---------------------------------------------------------------------------
 async def ensure_ready(sandbox_id: str, port: int, session: ClientSession):
+    """Returns (preview, woken) — `woken` is True if we had to start the sandbox.
+
+    Callers use `woken` to decide whether the site may have changed since its last
+    screenshot: a restart re-runs start.sh, which can pick up a newer build.
+    """
+    woken = False
     sandbox = await daytona.get(sandbox_id)
     if sandbox.state != SandboxState.STARTED:
         # This is where the snapshot entrypoint supervisor (supervise.sh) re-runs
         # /home/daytona/project/start.sh and relaunches the server. start() waits until
         # the sandbox itself is "started" (not until the server binds).
         await sandbox.start()
+        woken = True
     # Cap the compute bill: auto-stop after AUTO_STOP_MINUTES of no SDK activity.
     # Daytona counts SDK interactions (state changes, process.exec, etc.) as
     # activity but NOT preview HTTP traffic — so the agent's own tool calls keep an
@@ -131,7 +140,7 @@ async def ensure_ready(sandbox_id: str, port: int, session: ClientSession):
         _autostop_configured.add(sandbox_id)
     preview = await sandbox.get_preview_link(port)   # -> .url, .token
     await wait_for_server(session, preview.url, preview.token)
-    return preview
+    return preview, woken
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +159,7 @@ def upstream_url(preview_url: str, path: str, query: "URL") -> URL:
 # ---------------------------------------------------------------------------
 async def proxy_ws(request, sandbox_id, port, path, session):
     try:
-        preview = await ensure_ready(sandbox_id, port, session)
+        preview, _woken = await ensure_ready(sandbox_id, port, session)
     except Exception:
         return web.Response(status=503, text="Warming up…")
 
@@ -215,13 +224,25 @@ async def handler(request: web.Request):
         return await proxy_ws(request, sandbox_id, port, path, session)
 
     try:
-        preview = await ensure_ready(sandbox_id, port, session)
+        preview, woken = await ensure_ready(sandbox_id, port, session)
     except Exception as e:
         # Serve a branded "warming up" page instead of a raw 502.
         return web.Response(
             status=503, content_type="text/html",
             text=f"<h1>Warming up…</h1><p>{e}</p>",
         )
+
+    # Dynamic registration: this app demonstrably exists and serves traffic, so
+    # remember it for the gallery (registry.py). Memory-only for a known app.
+    is_new = registry.touch(sandbox_id, port)
+
+    # Refresh the screenshot when the site may have changed — on first sight, or
+    # after a wake (which re-runs start.sh and can pick up a newer build). This is
+    # fire-and-forget: it must not delay the response the visitor is waiting on.
+    # It's also free, because the sandbox is awake right now either way; the
+    # gallery never wakes anything by itself.
+    if is_new or woken:
+        schedule_capture(app_key(sandbox_id, port), preview.url, preview.token)
 
     target = upstream_url(preview.url, path, request.rel_url.query)
 
@@ -276,10 +297,21 @@ async def check(request: web.Request) -> web.Response:
 
 
 # ---------------------------------------------------------------------------
-# Help page for the bare base domain (or any non-preview host). No sandbox
-# picker (routing is host-in-the-URL by design) — just usage text.
+# Anything that isn't a preview host. On the login host that's the gallery
+# (home.py); anywhere else it's usage text, since routing is host-in-the-URL by
+# design and there's nothing to pick from.
+#
+# Note this is reached through the catch-all rather than a registered "/" route:
+# registering "/" would shadow the ROOT PATH OF EVERY PREVIEW SITE, since routes
+# match on path across all hosts.
 # ---------------------------------------------------------------------------
 async def index(request: web.Request):
+    if AUTH_HOST and request.host.split(":")[0].lower() == AUTH_HOST:
+        # Local import: home.py reaches back into ensure_ready for its Refresh
+        # button, so importing it at module scope would be a cycle.
+        from .home import home_page
+        return await home_page(request)
+
     base = PREVIEW_BASE_DOMAIN or "&lt;PREVIEW_BASE_DOMAIN unset&gt;"
     return web.Response(
         content_type="text/html",

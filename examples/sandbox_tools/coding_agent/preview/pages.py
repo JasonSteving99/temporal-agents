@@ -161,3 +161,175 @@ form.onsubmit = async (e) => {
 render(__GUESTS__);
 </script></body></html>
 """
+
+# The gallery. Rendered at the root of the login host for any signed-in user;
+# the "Manage access" control is emitted only when __IS_ADMIN__ is true, so the
+# admin path stops being something you have to memorise.
+#
+# Tiles are STATIC IMAGES, never iframes — an iframe per app would wake every
+# sandbox in the gallery just to look at it, and each wake bills for compute.
+HOME_PAGE = """<!doctype html>
+<html><head><meta charset="utf-8"><title>Preview gallery</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  *{box-sizing:border-box}
+  body{font:16px/1.5 system-ui,sans-serif;background:#0b0d10;color:#e6e8eb;margin:0;
+       padding:40px 24px 64px}
+  .wrap{max-width:1100px;margin:0 auto}
+  header{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:6px}
+  h1{font-size:22px;margin:0;flex:1}
+  .sub{color:#98a2b3;font-size:14px;margin:0 0 28px}
+  .btn{font:inherit;font-size:14px;padding:7px 14px;border-radius:8px;border:1px solid #262b33;
+       cursor:pointer;background:#14171c;color:#e6e8eb;text-decoration:none;display:inline-block}
+  .btn:hover{border-color:#3b4250}
+  .btn.primary{background:#3b82f6;border-color:#3b82f6;color:#fff}
+  .btn:disabled{opacity:.5;cursor:default}
+  .grid{display:grid;gap:20px;grid-template-columns:repeat(auto-fill,minmax(300px,1fr))}
+  .card{background:#14171c;border:1px solid #262b33;border-radius:12px;overflow:hidden;
+        display:flex;flex-direction:column}
+  .shot{display:block;width:100%;aspect-ratio:16/10;object-fit:cover;object-position:top center;
+        background:#0f1216;border-bottom:1px solid #262b33}
+  .noshot{display:grid;place-items:center;color:#4b5563;font-size:13px;text-align:center;padding:16px}
+  .meta{padding:14px 16px;flex:1;min-width:0}
+  .title{font-size:15px;font-weight:600;margin:0 0 3px;overflow:hidden;text-overflow:ellipsis;
+         white-space:nowrap}
+  .host{font-size:12px;color:#667085;font-family:ui-monospace,monospace;overflow:hidden;
+        text-overflow:ellipsis;white-space:nowrap}
+  .when{font-size:12px;color:#4b5563;margin-top:6px}
+  .actions{display:flex;gap:8px;padding:0 16px 14px;flex-wrap:wrap}
+  .empty{border:1px dashed #262b33;border-radius:12px;padding:48px 24px;text-align:center;
+         color:#667085}
+  .msg{font-size:13px;margin:18px 0 0;min-height:1em;color:#98a2b3}
+  .msg.bad{color:#f87171}
+  .note{font-size:12px;color:#4b5563;margin-top:28px;line-height:1.6}
+  a{color:#60a5fa}
+</style></head>
+<body><div class="wrap">
+  <header>
+    <h1>Preview gallery</h1>
+    <span id="admin-slot"></span>
+    <a class="btn" href="/__auth/logout">Sign out</a>
+  </header>
+  <p class="sub">Every site the agent has served, across sessions. Signed in as __EMAIL__.</p>
+  <div class="grid" id="grid"></div>
+  <div class="msg" id="msg"></div>
+  <p class="note">
+    Tiles are screenshots, not live pages — loading the real sites here would wake every
+    sandbox and bill for compute. Each shot refreshes automatically when the proxy wakes
+    that sandbox to serve someone. <strong>Refresh</strong> forces a new one, and will wake
+    the sandbox if it's asleep.
+  </p>
+</div>
+<script>
+const APPS = __APPS__, IS_ADMIN = __IS_ADMIN__, BASE = __BASE__;
+const grid = document.getElementById("grid"), msg = document.getElementById("msg");
+
+if (IS_ADMIN) {
+  const a = document.createElement("a");
+  a.className = "btn"; a.href = "/__auth/admin"; a.textContent = "Manage access";
+  document.getElementById("admin-slot").appendChild(a);
+}
+
+function ago(ts) {
+  if (!ts) return "never";
+  const s = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+  if (s < 60) return "just now";
+  const units = [["d", 86400], ["h", 3600], ["m", 60]];
+  for (const [label, size] of units) {
+    if (s >= size) return Math.floor(s / size) + label + " ago";
+  }
+  return "just now";
+}
+
+function card(app) {
+  const host = app.key + "." + BASE;
+  const el = document.createElement("div");
+  el.className = "card";
+
+  if (app.shot_at) {
+    const img = document.createElement("img");
+    img.className = "shot";
+    img.loading = "lazy";
+    img.alt = "";
+    img.src = "/__apps/shot/" + encodeURIComponent(app.key) + "?v=" + app.shot_at;
+    el.appendChild(img);
+  } else {
+    const ph = document.createElement("div");
+    ph.className = "shot noshot";
+    ph.textContent = "No screenshot yet — open the site or press Refresh";
+    el.appendChild(ph);
+  }
+
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  const t = document.createElement("p");
+  t.className = "title";
+  t.textContent = app.title || ("port " + app.port);   // textContent: titles come from agent-built pages
+  const h = document.createElement("div");
+  h.className = "host"; h.textContent = host;
+  const w = document.createElement("div");
+  w.className = "when";
+  w.textContent = "visited " + ago(app.last_seen) + " · shot " + ago(app.shot_at);
+  meta.append(t, h, w);
+  el.appendChild(meta);
+
+  const actions = document.createElement("div");
+  actions.className = "actions";
+  const open = document.createElement("a");
+  open.className = "btn primary"; open.href = "https://" + host + "/";
+  open.target = "_blank"; open.rel = "noopener"; open.textContent = "Open";
+  const refresh = document.createElement("button");
+  refresh.className = "btn"; refresh.textContent = "Refresh";
+  refresh.title = "Re-screenshot. Wakes the sandbox if it is stopped.";
+  refresh.onclick = () => post("/__apps/refresh", app.key, refresh, "Refreshing…");
+  actions.append(open, refresh);
+  if (IS_ADMIN) {
+    const forget = document.createElement("button");
+    forget.className = "btn"; forget.textContent = "Forget";
+    forget.title = "Remove from this gallery. Does not touch the sandbox.";
+    forget.onclick = () => {
+      if (confirm("Remove " + host + " from the gallery?")) {
+        post("/__apps/forget", app.key, forget, "Removing…");
+      }
+    };
+    actions.appendChild(forget);
+  }
+  el.appendChild(actions);
+  return el;
+}
+
+function render(apps) {
+  grid.innerHTML = "";
+  if (!apps.length) {
+    const d = document.createElement("div");
+    d.className = "empty";
+    d.textContent = "No preview sites yet. Ask the agent to build and serve one, open it, and it shows up here.";
+    grid.appendChild(d);
+    return;
+  }
+  for (const app of apps) grid.appendChild(card(app));
+}
+
+async function post(url, key, btn, pending) {
+  const label = btn.textContent;
+  btn.disabled = true; btn.textContent = pending;
+  msg.className = "msg"; msg.textContent = "";
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ key }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.message || res.statusText);
+    msg.textContent = data.message || "";
+    render(data.apps || []);
+  } catch (e) {
+    msg.className = "msg bad"; msg.textContent = e.message || String(e);
+    btn.disabled = false; btn.textContent = label;
+  }
+}
+
+render(APPS);
+</script></body></html>
+"""

@@ -40,18 +40,24 @@ Run it with `python -m examples.sandbox_tools.coding_agent.preview`.
 
 THE MAP — modules bottom-up, each importing only the ones above it:
 
-    config.py     Every environment knob, in one place. No logic.
-    allowlist.py  WHO may view previews: env-fixed admins + a file-backed,
-                  live-editable guest list. The privilege split lives here.
-    session.py    The gate itself: signed session cookies, and the is_authed /
-                  is_admin predicates every request is checked against.
-    pages.py      The two HTML pages (sign-in, admin panel). Markup only.
-    auth.py       HTTP handlers for signing in and for editing the guest list.
-    proxy.py      The actual proxying: wake the sandbox, wait for its server,
-                  forward the request. Plus the Caddy cert-issuance check.
-    app.py        Route table + lifecycle. The order routes are added in is
-                  load-bearing — read the comments there.
+    config.py      Every environment knob, in one place. No logic.
+    allowlist.py   WHO may view previews: env-fixed admins + a file-backed,
+                   live-editable guest list. The privilege split lives here.
+    registry.py    WHAT exists: every preview site the proxy has ever served,
+                   registered implicitly as it forwards traffic.
+    session.py     The gate itself: signed session cookies, and the is_authed /
+                   is_admin predicates every request is checked against.
+    screenshots.py Headless-browser capture, taken only while a sandbox is
+                   already awake — the reason the gallery is images, not iframes.
+    pages.py       The three HTML pages (sign-in, admin panel, gallery). Markup only.
+    auth.py        HTTP handlers for signing in and for editing the guest list.
+    home.py        The gallery and its routes.
+    proxy.py       The actual proxying: wake the sandbox, wait for its server,
+                   forward the request. Plus the Caddy cert-issuance check.
+    app.py         Route table + lifecycle. The order routes are added in is
+                   load-bearing — read the comments there.
 
 Start at `allowlist.py` if you care about the security model, `proxy.py` if you
-care about how a request reaches a sandbox.
+care about how a request reaches a sandbox, `screenshots.py` if you care about
+what the gallery costs to run.
 """

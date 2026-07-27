@@ -134,6 +134,37 @@ all). Setup, once:
    and no guests nobody gets in at all.
 5. Set `PREVIEW_SESSION_SECRET` (`openssl rand -hex 32`), or sessions die on each proxy restart.
 
+## The preview gallery
+
+**`https://login.<PREVIEW_BASE_DOMAIN>/`** lists every preview site the proxy has ever served — the
+home page after you sign in, and the way to find sites from old agent sessions whose sandbox ids only
+ever existed in a chat transcript. Admins get a **Manage access** link there too, so the admin path
+isn't something to memorise.
+
+Registration is automatic and needs no configuration: whenever the proxy successfully forwards a
+request to a `<sandboxId>-<port>`, it remembers it.
+
+**Tiles are screenshots, never iframes.** An iframe per app would wake every sandbox in the gallery
+just to render the page, and each wake bills for compute. So screenshots are captured only at the
+moments a sandbox is *already* awake and the capture is therefore free:
+
+- the first time the proxy ever serves that app, and
+- immediately after the proxy wakes a stopped sandbox for a real visitor — done in the background so
+  the visitor isn't kept waiting, and it picks up whatever `start.sh` relaunched, so a rebuilt site
+  gets a fresh shot.
+
+**Refresh** on a tile forces a new screenshot and *will* wake the sandbox if it's stopped — the only
+control here that can cost you anything, and the button says so. **Forget** (admins only) drops an
+app from the gallery; it never touches the sandbox, and the app re-registers if anyone visits it
+again. Dead sandboxes aren't pruned automatically — a transient Daytona error is indistinguishable
+enough from "deleted" that auto-removal would eventually eat live entries — so stale tiles are left
+showing their age for you to Forget.
+
+Capture needs Playwright + Chromium, installed in the image by the `playwright install` layer in the
+`Dockerfile` (~150MB, using the stripped `chromium-headless-shell` build). If that layer is removed
+or the browser fails to launch, the gallery degrades to placeholder tiles and everything else keeps
+working; set `PREVIEW_SCREENSHOTS=0` to skip the attempt entirely.
+
 ### Adding people
 
 Sign in and open **`https://login.<PREVIEW_BASE_DOMAIN>/__auth/admin`**. Add or remove guests there

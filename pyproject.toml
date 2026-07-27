@@ -22,6 +22,10 @@ dependencies = [
     # the preview/ package imports aiohttp directly (the upstream justfile injected it ad-hoc via
     # `uv run --with aiohttp`); declare it so it's baked into the image.
     "aiohttp>=3.9",
+    # Headless Chromium driver for the preview gallery's screenshots. The wheel is small; the
+    # browser itself is downloaded in the Dockerfile. preview/screenshots.py imports it lazily and
+    # degrades to placeholder tiles if it (or the browser) is missing, so this is soft-required.
+    "playwright>=1.49",
 ]
 
 [tool.uv]

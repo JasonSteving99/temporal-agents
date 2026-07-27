@@ -75,6 +75,9 @@ services:
       # Admins are NOT in here — they come from PREVIEW_ADMIN_EMAILS in .env, so nothing
       # reachable over HTTP can grant admin.
       - preview-auth:/data/preview-auth
+      # The gallery: which preview sites exist, plus their screenshots. Same deal —
+      # written at runtime, so it needs a volume to survive an image pull.
+      - preview-apps:/data/preview-apps
     restart: unless-stopped
 
   # Housekeeping: the large-payload offload driver never deletes what it writes (files are keyed by
@@ -121,6 +124,11 @@ volumes:
   # after each update. Back it up with:
   #   docker run --rm -v coding-agent_preview-auth:/d alpine cat /d/allowed_emails.json
   preview-auth:
+
+  # The preview gallery: apps.json (which sites exist) + shots/ (their screenshots).
+  # Screenshots are ~10-60KB jpegs capped at PREVIEW_MAX_APPS entries, so this stays small.
+  # Losing it is harmless — apps re-register the next time anyone opens them.
+  preview-apps:
 
   # Docker-managed named volume for Temporal large-payload offload (LARGE_PAYLOAD_DRIVER=local) —
   # Docker owns the storage, you never touch a host path. Correct for a single host; use S3
