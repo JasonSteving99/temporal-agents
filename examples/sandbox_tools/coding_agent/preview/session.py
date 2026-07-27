@@ -81,6 +81,20 @@ def is_authed(request: web.Request) -> bool:
     return email is not None and allowlist.allows(email)
 
 
+def can_use_agent(request: web.Request) -> bool:
+    """May they run the agent? Admins, plus members granted the "agent" role.
+
+    Re-checked per request like is_authed, so an admin demoting someone in the
+    panel cuts off their agent access on the next click rather than whenever their
+    cookie expires. This is the check that stands between a signed-in guest and
+    your token spend.
+    """
+    if not AUTH_ENABLED:
+        return True
+    email = request_email(request)
+    return email is not None and allowlist.allows_agent(email)
+
+
 def is_admin(request: web.Request) -> bool:
     # Note the missing `if not AUTH_ENABLED: return True` that is_authed has. With
     # the gate off, everyone is "authed" — inheriting that here would expose the

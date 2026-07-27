@@ -27,7 +27,13 @@ from .config import AGENT_ENABLED, AGENT_HOST, AUTH_HOST, PREVIEW_BASE_DOMAIN
 from .pages import HOME_PAGE
 from .registry import registry
 from .screenshots import screenshotter, shot_path
-from .session import is_admin, is_authed, redirect_to_login, request_email
+from .session import (
+    can_use_agent,
+    is_admin,
+    is_authed,
+    redirect_to_login,
+    request_email,
+)
 
 
 async def home_page(request: web.Request) -> web.Response:
@@ -35,8 +41,9 @@ async def home_page(request: web.Request) -> web.Response:
     if not is_authed(request):
         return redirect_to_login(request)
     admin = is_admin(request)
-    # Only admins can use the agent, so only they are shown the way to it.
-    agent_url = f"https://{AGENT_HOST}/" if (admin and AGENT_ENABLED) else ""
+    # Shown to whoever may actually use it — admins and the "agent" role — so a
+    # granted member discovers it without being told the hostname.
+    agent_url = f"https://{AGENT_HOST}/" if (AGENT_ENABLED and can_use_agent(request)) else ""
     body = (
         HOME_PAGE.replace("__APPS__", json.dumps(registry.list()))
         .replace("__AGENT_URL__", json.dumps(agent_url))

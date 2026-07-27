@@ -21,10 +21,10 @@ noting about how it responds to everyone else:
   * Non-admins get 404, not 403. A 403 confirms "there IS an admin panel here,
     you're just not on the list", which is a hint worth not giving out. To a
     signed-in friend poking at URLs, this endpoint simply does not exist.
-  * The panel can only add/remove GUESTS. There is no route that writes
-    ADMIN_EMAILS, because it comes from the environment (allowlist.py) — so a
-    friend who somehow reached these handlers still could not make themselves an
-    admin, only grant preview access.
+  * The panel can only manage MEMBERS and their roles. There is no route that
+    writes ADMIN_EMAILS, because it comes from the environment (allowlist.py) —
+    so someone who reached these handlers could grant preview or agent access,
+    but never admin, and so never the ability to grant.
 """
 
 import html
@@ -33,7 +33,7 @@ from urllib.parse import urlencode
 
 from aiohttp import ClientSession, web
 
-from .allowlist import allowlist, clean_email
+from .allowlist import ROLE_PREVIEW, ROLES, allowlist, clean_email
 from .config import (
     ADMIN_EMAILS,
     AUTH_ENABLED,
@@ -136,7 +136,7 @@ async def admin_page(request: web.Request) -> web.Response:
     if request.host.split(":")[0].lower() != AUTH_HOST:
         return web.HTTPFound(f"https://{AUTH_HOST}/__auth/admin")
     body = (
-        ADMIN_PAGE.replace("__GUESTS__", json.dumps(allowlist.guests()))
+        ADMIN_PAGE.replace("__MEMBERS__", json.dumps(allowlist.members()))
         .replace("__ADMINS__", json.dumps(sorted(ADMIN_EMAILS)))
         .replace("__EMAIL__", html.escape(request_email(request) or ""))
     )
@@ -144,7 +144,12 @@ async def admin_page(request: web.Request) -> web.Response:
 
 
 async def admin_guests(request: web.Request) -> web.Response:
-    """Add/remove one guest. Admin-only, same-origin-only."""
+    """Add/remove one member, or change their role. Admin-only, same-origin-only.
+
+    `set_role` is the one action that can hand out spending power (the "agent"
+    role), so it lives behind the same is_admin check as everything else here —
+    a member can never change their own role, or anyone else's.
+    """
     if not is_admin(request):
         return web.json_response({"message": "Not found"}, status=404)
     # CSRF: the session cookie is SameSite=Lax, which already stops a cross-site
@@ -160,12 +165,20 @@ async def admin_guests(request: web.Request) -> web.Response:
 
     email = clean_email(payload.get("email"))
     action = payload.get("action")
+    role = payload.get("role", ROLE_PREVIEW)
     if not email:
         return web.json_response({"message": "That doesn't look like an email."}, status=400)
-    if action not in ("add", "remove"):
+    if action not in ("add", "remove", "set_role"):
         return web.json_response({"message": "Unknown action."}, status=400)
+    if action in ("add", "set_role") and role not in ROLES:
+        return web.json_response({"message": "Unknown role."}, status=400)
 
-    ok, message = await (allowlist.add(email) if action == "add" else allowlist.remove(email))
+    if action == "add":
+        ok, message = await allowlist.add(email, role)
+    elif action == "set_role":
+        ok, message = await allowlist.set_role(email, role)
+    else:
+        ok, message = await allowlist.remove(email)
     return web.json_response(
-        {"message": message, "guests": allowlist.guests()}, status=200 if ok else 409
+        {"message": message, "members": allowlist.members()}, status=200 if ok else 409
     )

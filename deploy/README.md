@@ -167,11 +167,11 @@ on the gallery. Nothing else to configure: that hostname is an ordinary `<label>
 wildcard DNS record and wildcard Caddy block already route it, and the session cookie already covers
 it. No new DNS record, no new Caddy block, no new Firebase authorized domain.
 
-**It is gated on `is_admin`, not `is_authed`** — the one place in this proxy where a signed-in guest
-is refused. Previews only cost a sandbox wake; the agent spends model tokens and Daytona compute on
-every message, so friends you add to the guest list can browse your preview sites but cannot run the
-agent. A guest who finds the URL gets a plain "Admins only" page rather than a redirect to sign-in,
-which would only loop them back.
+**Signing in is not enough to reach it.** Previews only cost a sandbox wake; the agent spends model
+tokens and Daytona compute on every message, so it takes the **admin** or **agent** tier — a
+preview-tier member can browse your sites but not run the agent. Grant the agent tier from the
+[admin panel](#adding-people). Someone without it gets a plain "Agent access required" page rather
+than a redirect to sign-in, which would only loop them back.
 
 Requests stream rather than buffer, so the UI's `text/event-stream` attach endpoint behaves exactly
 as it does over Tailscale — tokens appear as they're generated, not in one lump when the turn ends.
@@ -218,17 +218,25 @@ on the gallery. Add or remove guests there
 and it takes effect immediately — no restart, no redeploy, no editing `.env`. The list is stored as
 JSON on the `preview-auth` Docker volume.
 
-Access comes in two tiers, and they are stored in two different places on purpose:
+Access comes in three tiers, stored in two different places on purpose:
 
 | | Where it lives | Who can change it | What it grants |
 |---|---|---|---|
-| **Admins** | `PREVIEW_ADMIN_EMAILS` in `.env` | shell access to the host, then a restart | previews **+** the admin panel |
-| **Guests** | JSON on the `preview-auth` volume | any admin, live from the panel | previews only |
+| **Admin** | `PREVIEW_ADMIN_EMAILS` in `.env` | shell access to the host, then a restart | previews + agent + the admin panel |
+| **Agent** | JSON on the `preview-auth` volume | any admin, live from the panel | previews + the agent |
+| **Preview** | JSON on the `preview-auth` volume | any admin, live from the panel | previews only (the default) |
+
+Pick the tier when you add someone, or flip it later from the dropdown on their row.
 
 That split is the security property: **nothing reachable over HTTP can create an admin.** The panel
-writes only the guest file, so even a bug that exposed it could hand out preview access, never admin
-— and your friends can't promote themselves or each other. There is deliberately no "make admin"
-button; adding one would collapse the two tiers back into one.
+writes only the member file, so even a bug that exposed it could hand out preview or agent access,
+never admin — and members can't promote themselves or each other. There is deliberately no "make
+admin" button; adding one would collapse the tiers into one.
+
+Be deliberate with the **agent** tier specifically. It's the only thing the panel can grant that
+spends money — model tokens and Daytona compute — where the other tiers only cost you a sandbox
+wake. The panel asks for confirmation before granting it. It still can't grant the ability to grant,
+so the worst case is a bill, not a takeover.
 
 Other things worth knowing:
 

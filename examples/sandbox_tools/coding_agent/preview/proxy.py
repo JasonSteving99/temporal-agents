@@ -25,7 +25,7 @@ from .config import (
 from .pages import DENIED_PAGE
 from .registry import app_key, registry
 from .screenshots import schedule_capture
-from .session import is_admin, is_authed, redirect_to_login
+from .session import can_use_agent, is_authed, redirect_to_login
 
 
 def _make_daytona() -> AsyncDaytona:
@@ -192,15 +192,15 @@ async def forward(
 
 
 # ---------------------------------------------------------------------------
-# The agent chat app, ADMINS ONLY (see config.AGENT_HOST). Every message here
-# spends model tokens and Daytona compute, so `is_admin` — a signed-in guest who
-# can view previews is explicitly not allowed to run the agent.
+# The agent chat app (see config.AGENT_HOST). Every message here spends model
+# tokens and Daytona compute, so viewing previews is not enough: the caller must
+# be an admin or hold the "agent" role an admin granted them.
 # ---------------------------------------------------------------------------
 async def proxy_agent(request: web.Request, session: ClientSession) -> web.StreamResponse:
-    if not is_admin(request):
+    if not can_use_agent(request):
         if is_authed(request):
-            # Signed in, just not an admin. A redirect to sign-in would loop them
-            # straight back here, so say plainly what happened.
+            # Signed in, just not allowed here. A redirect to sign-in would loop
+            # them straight back, so say plainly what happened.
             return web.Response(status=403, content_type="text/html", text=DENIED_PAGE)
         return redirect_to_login(request)
     # No WebSocket branch: the harness web app streams with SSE, not websockets, and

@@ -75,6 +75,9 @@ ADMIN_PAGE = """<!doctype html>
   .row{display:flex;gap:8px;margin-bottom:24px}
   input{flex:1;font:inherit;padding:10px 12px;border-radius:8px;background:#14171c;
         color:inherit;border:1px solid #262b33}
+  select{font:inherit;padding:10px 12px;border-radius:8px;background:#14171c;
+         color:inherit;border:1px solid #262b33}
+  li select{padding:4px 8px;font-size:13px}
   button{font:inherit;padding:10px 18px;border-radius:8px;border:0;cursor:pointer;
          background:#3b82f6;color:#fff}
   button:disabled{opacity:.5;cursor:default}
@@ -86,6 +89,7 @@ ADMIN_PAGE = """<!doctype html>
   li button{background:transparent;color:#f87171;padding:4px 8px;font-size:13px}
   .tag{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:#fbbf24;
        border:1px solid #3f3722;background:#241f12;border-radius:5px;padding:2px 7px}
+  .tag.agent{color:#34d399;border-color:#1e3a30;background:#10231c}
   .empty{padding:20px 16px;color:#667085;font-size:14px;background:#14171c}
   .msg{font-size:13px;margin-top:16px;min-height:1em;color:#98a2b3}
   .msg.bad{color:#f87171}
@@ -94,10 +98,16 @@ ADMIN_PAGE = """<!doctype html>
 </style></head>
 <body><div class="wrap">
   <h1>Preview access</h1>
-  <p class="sub">Anyone listed here can sign in and view preview sites.</p>
+  <p class="sub">Anyone listed here can sign in and view preview sites. Grant
+     <strong>agent</strong> access only to people you're happy to have spend your
+     model tokens and sandbox compute.</p>
   <form class="row" id="add">
     <input id="email" type="email" placeholder="friend@example.com" required
            autocomplete="off" spellcheck="false">
+    <select id="role">
+      <option value="preview">Previews only</option>
+      <option value="agent">Previews + agent</option>
+    </select>
     <button type="submit">Add</button>
   </form>
   <ul id="list"></ul>
@@ -105,7 +115,8 @@ ADMIN_PAGE = """<!doctype html>
   <footer>
     Signed in as __EMAIL__ · <a href="/__auth/logout">Sign out</a><br>
     Admins are set by <code>PREVIEW_ADMIN_EMAILS</code> on the server and can't be
-    changed from this page.
+    granted, demoted or removed from this page — only an admin can hand out agent
+    access, and no one can hand out admin.
   </footer>
 </div>
 <script>
@@ -113,52 +124,74 @@ const list = document.getElementById("list"), msg = document.getElementById("msg
 const form = document.getElementById("add"), email = document.getElementById("email");
 const ADMINS = __ADMINS__;
 
-function render(guests) {
+function render(members) {
   list.innerHTML = "";
-  for (const a of ADMINS) list.appendChild(row(a, true));
-  for (const g of guests) list.appendChild(row(g, false));
-  if (!guests.length) {
+  for (const a of ADMINS) list.appendChild(row({ email: a, role: "admin" }, true));
+  for (const m of members) list.appendChild(row(m, false));
+  if (!members.length) {
     const d = document.createElement("div");
     d.className = "empty";
     d.textContent = "No guests yet — add someone above.";
     list.appendChild(d);
   }
 }
-function row(addr, admin) {
+function row(member, admin) {
   const li = document.createElement("li");
   const s = document.createElement("span");
-  s.textContent = addr;                      // textContent, never innerHTML
+  s.textContent = member.email;              // textContent, never innerHTML
   li.appendChild(s);
   if (admin) {
+    // Admins come from PREVIEW_ADMIN_EMAILS and have no controls here on purpose:
+    // this page cannot create, demote or remove one.
     const t = document.createElement("span");
     t.className = "tag"; t.textContent = "admin";
     li.appendChild(t);
-  } else {
-    const b = document.createElement("button");
-    b.textContent = "Remove";
-    b.onclick = () => send("remove", addr);
-    li.appendChild(b);
+    return li;
   }
+  if (member.role === "agent") {
+    const t = document.createElement("span");
+    t.className = "tag agent"; t.textContent = "agent";
+    li.appendChild(t);
+  }
+  const sel = document.createElement("select");
+  for (const [value, label] of [["preview", "Previews only"], ["agent", "Previews + agent"]]) {
+    const o = document.createElement("option");
+    o.value = value; o.textContent = label;
+    if (member.role === value) o.selected = true;
+    sel.appendChild(o);
+  }
+  sel.onchange = () => {
+    if (sel.value === "agent" &&
+        !confirm("Let " + member.email + " run the agent? They'll be able to spend your model tokens and sandbox compute.")) {
+      sel.value = member.role; return;
+    }
+    send("set_role", member.email, sel.value);
+  };
+  li.appendChild(sel);
+  const b = document.createElement("button");
+  b.textContent = "Remove";
+  b.onclick = () => send("remove", member.email);
+  li.appendChild(b);
   return li;
 }
-async function send(action, addr) {
+async function send(action, addr, role) {
   msg.className = "msg"; msg.textContent = "";
   const res = await fetch("/__auth/admin/guests", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ action, email: addr }),
+    body: JSON.stringify({ action, email: addr, role }),
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) { msg.className = "msg bad"; msg.textContent = data.message || res.statusText; return; }
-  msg.textContent = data.message || "";
-  render(data.guests || []);
+  if (!res.ok) { msg.className = "msg bad"; msg.textContent = data.message || res.statusText; }
+  else msg.textContent = data.message || "";
+  if (data.members) render(data.members);
 }
 form.onsubmit = async (e) => {
   e.preventDefault();
   const addr = email.value.trim();
-  if (addr) { await send("add", addr); email.value = ""; }
+  if (addr) { await send("add", addr, document.getElementById("role").value); email.value = ""; }
 };
-render(__GUESTS__);
+render(__MEMBERS__);
 </script></body></html>
 """
 
@@ -342,11 +375,11 @@ render(APPS);
 """
 
 
-# Shown to someone who IS signed in but is not an admin and asked for the agent
-# app. Deliberately not a redirect to sign-in: they're already signed in, so that
-# would just bounce them back here forever.
+# Shown to someone who IS signed in but hasn't been granted agent access.
+# Deliberately not a redirect to sign-in: they're already signed in, so that would
+# just bounce them back here forever.
 DENIED_PAGE = """<!doctype html>
-<html><head><meta charset="utf-8"><title>Admins only</title>
+<html><head><meta charset="utf-8"><title>Agent access required</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
   body{font:16px/1.5 system-ui,sans-serif;display:grid;place-items:center;
@@ -358,9 +391,9 @@ DENIED_PAGE = """<!doctype html>
   a{color:#60a5fa}
 </style></head>
 <body><div class="card">
-  <h1>Admins only</h1>
-  <p>You're signed in, but running the agent is restricted to administrators.
-     Preview sites are still open to you.</p>
+  <h1>Agent access required</h1>
+  <p>You're signed in, but running the agent has to be granted separately —
+     ask an administrator. Preview sites are still open to you.</p>
   <p><a href="/">Back to the gallery</a></p>
 </div></body></html>
 """
