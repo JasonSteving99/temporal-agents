@@ -30,6 +30,7 @@
 
 import logging
 import os
+import re
 
 import aiohttp
 from remote import Daytona
@@ -54,6 +55,19 @@ assert SANDBOX.backend == PROVIDER_NAME, (
 AUTHKEY_ENV_VAR = "TAILSCALE_AUTHKEY"
 
 _KEYS_URL = "https://api.tailscale.com/api/v2/tailnet/{tailnet}/keys"
+
+# The label the minted key carries in the Tailscale admin console. See the payload below for why it
+# is this plain: Tailscale rejects the request outright for punctuation or length, and the failure
+# lands at sandbox-creation time — i.e. it breaks the agent, not just the label.
+_DESCRIPTION = "sandboxed-coding-agent"
+
+# Checked at import (so a bad edit fails the WORKER at startup) rather than at mint time (where it
+# would fail a real user's first tool call, as a non-retryable sandbox-activation error). The
+# character class is deliberately narrower than whatever Tailscale actually accepts — there's no
+# upside to probing the boundary of an undocumented validator.
+assert re.fullmatch(r"[A-Za-z0-9 ._-]{1,50}", _DESCRIPTION), (
+    f"Tailscale rejects key descriptions over 50 chars or with punctuation: {_DESCRIPTION!r}"
+)
 
 
 def _tag() -> str:
@@ -99,7 +113,11 @@ async def mint_ephemeral_authkey(session: aiohttp.ClientSession) -> str:
         # Bounds how long an UNUSED key is worth stealing. It does not bound the session: a key that
         # has already been redeemed keeps its node online past this.
         "expirySeconds": expiry,
-        "description": "sandboxed-coding-agent (minted per sandbox by the backend provider)",
+        # Shown against the key in the admin console. Tailscale validates this tightly: max 50
+        # characters, and punctuation beyond `-`/`_`/`.` is rejected outright with
+        # "keys: description had invalid characters" — parentheses and colons included. Keep it
+        # boring; this is not the place for a sentence.
+        "description": _DESCRIPTION,
     }
 
     async with session.post(
