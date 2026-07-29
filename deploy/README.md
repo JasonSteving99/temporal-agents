@@ -50,6 +50,12 @@ Set `PREVIEW_BASE_DOMAIN` (e.g. `preview.example.com`) to the domain you'll serv
 feeds both the worker (the URL it hands the user) and the proxy (Host parsing). Leave it blank to turn
 previews off entirely.
 
+To put every sandbox on your **tailnet**, set `TAILSCALE_API_KEY` (and the `TAILSCALE_TAG` your ACLs
+grant against). The worker mints a single-use, ephemeral, tagged auth key per sandbox and injects it
+at creation; the sandbox redeems it on boot. This needs two edits to your tailnet policy file first
+(`tagOwners` for the tag, and an `acls` rule granting it) — both are spelled out in `.env.example`.
+Leave `TAILSCALE_API_KEY` blank to skip tailnet joining entirely.
+
 Both `.env` and `temporal.toml` are gitignored. If the image is under a different owner/tag than
 `ghcr.io/jasonsteving99/temporal-agents:latest`, edit the `x-image` line in
 `docker-compose.yml`.
@@ -277,6 +283,13 @@ docker compose pull && docker compose up -d
   Put them behind a firewall and a reverse proxy with TLS + your own auth before real use.
 - Secrets live in `.env` / `temporal.toml` on the host — keep them `chmod 600` and off version control
   (already gitignored).
+- **The tailnet tag is a grant to agent-written code.** A sandbox on your tailnet reaches whatever
+  your ACLs allow `TAILSCALE_TAG`, and what runs in that sandbox is whatever an LLM decided to write
+  — including in response to text it read off the internet. Grant the tag the narrowest access that
+  makes it useful, never `autogroup:internet` or blanket subnet access. `TAILSCALE_API_KEY` itself is
+  long-lived and can mint node keys: it stays in the worker's env and is never passed to a sandbox.
+  The per-sandbox key that IS passed in is single-use, ephemeral and short-expiry precisely because
+  it is readable by the agent (via its own `bash` tool) and recorded in Temporal history.
 
 ## Notes & limitations
 

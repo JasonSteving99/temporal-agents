@@ -67,8 +67,10 @@ worker:
 # Build (or verify) the Daytona snapshot the tools run on — the offline/CI step. Run once before
 # `just worker`, and again whenever tools.py, coding_agent_common/tool_impls.py, or the repo-root-
 # level examples/Dockerfile.sandbox-coding-agent changes. Needs DAYTONA_API_KEY in the .env.local.
+# SANDBOX.backend names a provider (minting a per-sandbox Tailscale key), and providers can't run
+# offline, so the build takes the concrete SANDBOX_BACKEND — the same object the provider copies.
 build-sandbox:
-    cd "{{ root }}" && uv run --extra sandbox python -c "from temporal_agent_harness.harness.sandbox import build_sandbox; from examples.sandbox_tools.coding_agent.tools import SANDBOX; print(build_sandbox(SANDBOX))"
+    cd "{{ root }}" && uv run --extra sandbox python -c "from temporal_agent_harness.harness.sandbox import build_sandbox; from examples.sandbox_tools.coding_agent.tools import SANDBOX, SANDBOX_BACKEND; print(build_sandbox(SANDBOX, backend=SANDBOX_BACKEND))"
 
 # Run the live-preview proxy on :8080. Wakes a stopped sandbox on demand and forwards to a server the
 # agent launched inside it, path-routed as http://localhost:8080/s/<sandboxId>/<port>/. Standalone —

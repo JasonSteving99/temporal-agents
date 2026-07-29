@@ -100,10 +100,13 @@ jobs:
           IMAGE: ${{ needs.build-and-push.outputs.image }}@${{ needs.build-and-push.outputs.digest }}
           DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
         run: |
+          # SANDBOX.backend names a provider (it mints a per-sandbox Tailscale key), which cannot run
+          # offline — no worker here — so the build takes the concrete config explicitly. It's the
+          # same object the provider copies at runtime, so build-time and run-time can't disagree.
           docker run --rm -e DAYTONA_API_KEY "$IMAGE" python -c "
           from temporal_agent_harness.harness.sandbox import build_sandbox
-          from examples.sandbox_tools.coding_agent.tools import SANDBOX
-          r = build_sandbox(SANDBOX)
+          from examples.sandbox_tools.coding_agent.tools import SANDBOX, SANDBOX_BACKEND
+          r = build_sandbox(SANDBOX, backend=SANDBOX_BACKEND)
           print('snapshot:', r.status, '-', r.detail)
           assert r.status in ('built', 'ready'), f'snapshot build failed: {r.status} {r.detail}'
           "

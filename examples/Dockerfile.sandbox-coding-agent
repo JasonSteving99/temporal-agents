@@ -14,17 +14,79 @@
 # live in the example dir so the Dockerfile could move there too.
 #
 # Build offline/CI only, never at runtime (SandboxConfig.require_prebuilt): `just build-sandbox`.
+#
+# ---------------------------------------------------------------------------------------------
+# Updating the harness (upstream pushed to `sandbox-tools`)
+# ---------------------------------------------------------------------------------------------
+# The harness reaches the two images by DIFFERENT mechanisms, so bumping it takes two steps and the
+# second one is easy to forget:
+#
+#   worker image (../Dockerfile)  <- ../uv.lock          resolved by uv, pins the commit
+#   this snapshot                 <- the SHA in sandbox_tools/coding_agent/pyproject.toml
+#
+# Step 1 — update the lock, which is what picks the new commit:
+#
+#     uv lock --upgrade-package temporal-agent-harness
+#
+# Step 2 — read the SHA uv just resolved and copy it into the example's pyproject:
+#
+#     grep 'temporal-agent-harness.git?rev=' uv.lock
+#     # source = { git = "...temporal-agent-harness.git?rev=sandbox-tools#<40-char SHA>" }
+#
+#   The SHA is the part after the `#`. Put that exact value after the `@` in
+#   sandbox_tools/coding_agent/pyproject.toml's dependency, so both images install the SAME commit.
+#   (`git ls-remote <url> sandbox-tools` also prints branch HEAD, but prefer the lock's SHA — that
+#   is the commit the worker will actually run, and it is what the two must agree on.)
+#
+# Step 3 — rebuild. Editing that pyproject changes this snapshot's content hash, which is the ONLY
+#   thing that triggers a rebuild: the snapshot is `sandboxed-coding-agent:<sha256 of everything
+#   under examples/ + this Dockerfile>`, so an upstream push alone leaves the name unchanged and
+#   `build_sandbox` reports `ready` while still running the old harness.
+#
+#     docker compose --profile setup run --rm build-sandbox    # from deploy/
+#
+#   (CI does the equivalent after pushing the worker image — see .github/workflows/build-image.yml.)
+#
+# To verify the two agree after a bump:
+#
+#     grep -o 'harness.git?rev=[^"]*' uv.lock
+#     grep -o 'harness.git@[0-9a-f]*' examples/sandbox_tools/coding_agent/pyproject.toml
 
 FROM ghcr.io/astral-sh/uv:python3.12-trixie-slim
 
 WORKDIR /app
 
 # The uv base image has no git, and uv shells out to `git` to fetch the harness dep below (without
-# this, `uv sync` fails with "Git executable not found").
-RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+# this, `uv sync` fails with "Git executable not found"). curl + gpg are for the Tailscale repo below.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git curl ca-certificates gnupg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Tailscale, so the sandbox can join your tailnet on boot (supervise.sh does the `tailscale up`; the
+# per-sandbox auth key arrives as the TAILSCALE_AUTHKEY env var, minted by the worker's backend
+# provider — see sandbox_tools/coding_agent/tailscale.py). Installed from Tailscale's own Debian repo
+# rather than the distro's, which lags badly. `trixie` must match this image's Debian release (the
+# uv base is python3.12-trixie-slim) — bump both together.
+#
+# Purely additive: with no TAILSCALE_AUTHKEY and no saved state, supervise.sh skips the whole thing
+# and the sandbox behaves exactly as it did before. Drop these two layers (and the tailscale block in
+# supervise.sh) if you don't use Tailscale at all.
+RUN curl -fsSL https://pkgs.tailscale.com/stable/debian/trixie.noarmor.gpg \
+        -o /usr/share/keyrings/tailscale-archive-keyring.gpg \
+    && curl -fsSL https://pkgs.tailscale.com/stable/debian/trixie.tailscale-keyring.list \
+        -o /etc/apt/sources.list.d/tailscale.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends tailscale \
+    && rm -rf /var/lib/apt/lists/*
+
+# tailscaled's node state. On the PERSISTENT filesystem, so a sandbox that is stopped and started
+# again (which the preview proxy does routinely) can re-announce itself with the identity it already
+# has instead of needing a second key — the auth key is single-use and cannot be redeemed twice.
+RUN mkdir -p /var/lib/tailscale
 
 # Install the one dependency (the harness + `sandbox` extra, from GitHub) into /app/.venv. No uv.lock
-# is committed — this is only ever built in the snapshot, so uv resolves fresh; `package = false`
+# is committed — this is only ever built in the snapshot, so uv resolves fresh, and the commit SHA
+# pinned in that pyproject is the whole pin (see "Updating the harness" above); `package = false`
 # (pyproject.toml) makes uv install only that dep, not the example as a package.
 COPY sandbox_tools/coding_agent/pyproject.toml ./
 RUN uv sync --no-install-project

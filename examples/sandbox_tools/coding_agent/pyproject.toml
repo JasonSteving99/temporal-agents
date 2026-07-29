@@ -4,15 +4,22 @@
 # SandboxConfig/Daytona) plus its `sandbox` extra (remote-box + the Daytona SDK), from GitHub. The
 # shared tool_impls the tools call is pure stdlib and is COPY'd into the image, not installed here.
 #
-# Pinned to the `sandbox-tools` branch until that support lands on `main`. No uv.lock is committed —
-# this is only ever built in the snapshot, never locally, so the Dockerfile's `uv sync` resolves
-# fresh at build time (a rebuild follows the branch HEAD).
+# Taken from the `sandbox-tools` branch until that support lands on `main`, but pinned to an exact
+# COMMIT rather than the branch name. Two reasons, both load-bearing — see the "Updating the harness"
+# section of examples/Dockerfile.sandbox-coding-agent for the how-to:
+#   1. No uv.lock is committed here (this is only ever built inside the snapshot, never locally), so
+#      the SHA is the ONLY pin — a branch name would resolve to whatever HEAD happened to be at build
+#      time, and two builds of the "same" snapshot could differ.
+#   2. The snapshot is named `sandboxed-coding-agent:<hash of examples/ + the Dockerfile>`, so an
+#      upstream push does not invalidate it and `build_sandbox` would report `ready` forever. Editing
+#      this SHA is what changes the hash and actually forces the rebuild.
+# Keep this SHA equal to the one `uv.lock` resolved for the worker image (see that section).
 [project]
 name = "sandboxed-coding-agent"
 version = "0.0.0"
 requires-python = ">=3.12"
 dependencies = [
-    "temporal-agent-harness[sandbox] @ git+https://github.com/temporal-community/temporal-agent-harness.git@sandbox-tools",
+    "temporal-agent-harness[sandbox] @ git+https://github.com/temporal-community/temporal-agent-harness.git@5421ceae74e03e0b86002cf081643aa155e18463",
 ]
 
 # Not an installable package itself — it's just an environment spec for the snapshot. This makes

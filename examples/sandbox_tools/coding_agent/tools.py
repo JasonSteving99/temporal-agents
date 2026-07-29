@@ -38,16 +38,33 @@ PREVIEW_BASE_DOMAIN = os.environ.get("PREVIEW_BASE_DOMAIN", "").strip().lower()
 # app here and serve it for the preview proxy (see preview/ and supervise.sh).
 PROJECT_ROOT = Path("/home/daytona/project")
 
+# The snapshot's IDENTITY: the fields the image is built from. Everything that must agree between
+# build time and run time lives here, in one object, so the two can't drift — the offline build
+# (`build_sandbox(SANDBOX, backend=SANDBOX_BACKEND)`) and the runtime provider (tailscale.py, which
+# `model_copy`s this and adds env_vars) both take it from this single definition. Drift would fail
+# activation's `require_prebuilt` check.
+SANDBOX_BACKEND = Daytona(
+    snapshot_name="sandboxed-coding-agent",
+    dockerfile_path="Dockerfile.sandbox-coding-agent",
+)
+
 # The ONE place this agent's sandbox backend is chosen (never the tools themselves). Runs on a real
 # Daytona cloud sandbox. local_project_root is the `examples/` dir (Path parents up from this file):
 # the snapshot is built from BOTH this example's tools.py and the shared coding_agent_common, whose
 # lowest common ancestor is examples/ — see examples/Dockerfile.sandbox-coding-agent for why the
 # Dockerfile lives there. Needs DAYTONA_API_KEY and a prebuilt snapshot (`just build-sandbox`).
+#
+# `backend` is a provider NAME, not the config above: each sandbox needs its own freshly minted
+# Tailscale auth key in its environment, which takes an HTTP call and so cannot be stated as a
+# literal here. The worker registers the async callable under this name
+# (`sandbox_activities({...})` in worker.py) and it runs once per run inside `sandbox_activate`.
+# tailscale.py holds the callable; this module deliberately does not import it, since remote-box
+# re-imports THIS module inside the sandbox on every tool call.
+#
+# Offline builds can't run a provider (there's no worker), so they pass the config explicitly:
+# `build_sandbox(SANDBOX, backend=SANDBOX_BACKEND)`.
 SANDBOX = SandboxConfig(
-    backend=Daytona(
-        snapshot_name="sandboxed-coding-agent",
-        dockerfile_path="Dockerfile.sandbox-coding-agent",
-    ),
+    backend="daytona-tailscale",  # == tailscale.PROVIDER_NAME (a literal: see the import note above)
     local_project_root=Path(__file__).parent.parent.parent,  # -> examples/
 )
 

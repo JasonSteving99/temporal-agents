@@ -111,13 +111,18 @@ services:
   # tools.py / coding_agent_common/tool_impls.py / the snapshot Dockerfile change). Needs only
   # DAYTONA_API_KEY. Not started by `up` (setup profile):
   #   docker compose --profile setup run --rm build-sandbox
+  #
+  # SANDBOX.backend is a provider NAME (it mints a Tailscale key per sandbox), and a provider can't
+  # run offline — there's no worker here — so the build is handed the concrete config explicitly.
+  # SANDBOX_BACKEND is the same object the provider copies at runtime, so what's built and what's
+  # run cannot disagree.
   build-sandbox:
     image: *image
     profiles: ["setup"]
     command:
       - python
       - -c
-      - "from temporal_agent_harness.harness.sandbox import build_sandbox; from examples.sandbox_tools.coding_agent.tools import SANDBOX; print(build_sandbox(SANDBOX))"
+      - "from temporal_agent_harness.harness.sandbox import build_sandbox; from examples.sandbox_tools.coding_agent.tools import SANDBOX, SANDBOX_BACKEND; print(build_sandbox(SANDBOX, backend=SANDBOX_BACKEND))"
     env_file: [.env]
     restart: "no"
 

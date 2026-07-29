@@ -3,7 +3,8 @@
 Run from the repo root with:
     uv run --extra sandbox --group examples python -m examples.sandbox_tools.coding_agent.worker
 
-Hosts SandboxedCodingAgentWorkflow plus its sandbox lifecycle activities (SANDBOX_ACTIVITIES) and
+Hosts SandboxedCodingAgentWorkflow plus its sandbox lifecycle activities (and the Tailscale backend
+provider they resolve this agent's `SandboxConfig.backend` name against) and
 its six sandboxed tools' activities (bash/read/write/edit/grep/glob). The Gemini plugin is
 registered because the agent drives the Gemini Interactions API; the plugin auto-registers its
 interactions activity. Run `just build-sandbox` once before starting this worker — runtime never
@@ -14,6 +15,8 @@ Env vars (set in .env.local — see .env.example):
     GEMINI_API_KEY                            required — the agent calls the Gemini API
     DAYTONA_API_KEY                           required — the tools run on Daytona
     SANDBOXED_CODING_AGENT_TASK_QUEUE         task queue to poll (default: sandboxed-coding-agent)
+    TAILSCALE_API_KEY                         optional — mints each sandbox's tailnet auth key;
+                                              unset means sandboxes join no tailnet (see tailscale.py)
 """
 
 import asyncio
@@ -29,8 +32,9 @@ from temporalio.worker import Worker
 
 from temporal_agent_harness.ai_sdks.google_genai_plugin import GoogleGenAIPlugin
 from temporal_agent_harness.harness import agent
-from temporal_agent_harness.harness.sandbox.activities import SANDBOX_ACTIVITIES
+from temporal_agent_harness.harness.sandbox.activities import sandbox_activities
 
+from .tailscale import PROVIDER_NAME, daytona_with_tailscale
 from .tools import SANDBOXED_CODING_TOOLS
 from .workflow import TASK_QUEUE, SandboxedCodingAgentWorkflow
 
@@ -60,10 +64,15 @@ async def main() -> None:
         client,
         task_queue=task_queue,
         workflows=[SandboxedCodingAgentWorkflow],
-        # SANDBOX_ACTIVITIES: sandbox activate/pause/terminate. One tool_activity per sandboxed tool:
-        # each tool's durable body. The Gemini interactions activity is registered by the plugin.
+        # sandbox_activities(...): sandbox activate/pause/terminate, plus the backend PROVIDER this
+        # agent names as its SandboxConfig.backend — the callable that mints the sandbox's Tailscale
+        # auth key. The factory form is used instead of the ready-made SANDBOX_ACTIVITIES precisely
+        # because there's a provider to inject; register one or the other, never both (the three
+        # activity names can be claimed only once per worker).
+        # One tool_activity per sandboxed tool: each tool's durable body. The Gemini interactions
+        # activity is registered by the plugin.
         activities=[
-            *SANDBOX_ACTIVITIES,
+            *sandbox_activities({PROVIDER_NAME: daytona_with_tailscale}),
             *(agent.tool_activity(tool) for tool in SANDBOXED_CODING_TOOLS),
         ],
     )

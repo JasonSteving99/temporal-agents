@@ -9,7 +9,11 @@ name = "temporal-coding-agent-deploy"
 version = "0.1.0"
 requires-python = ">=3.12"  # the harness `sandbox` extra (remote-box) requires Python >= 3.12
 dependencies = [
-    # The harness + the three extras this example needs:
+    # The harness + the three extras this example needs. Tracked as a BRANCH here because uv.lock
+    # pins the exact commit for this image (`uv lock --upgrade-package temporal-agent-harness` moves
+    # it). The Daytona snapshot has no lock and pins the SHA inline instead, so after every bump copy
+    # the lock's resolved SHA into examples/sandbox_tools/coding_agent/pyproject.toml or the two
+    # images drift apart — see "Updating the harness" in examples/Dockerfile.sandbox-coding-agent.
     #   sandbox -> remote-box (+ the Daytona SDK)   the tools run in a Daytona cloud sandbox
     #   ui      -> fastapi[standard] (+ uvicorn)     the packaged web app + browser UI (dist ships in the wheel)
     #   genai   -> google-genai (+ google-auth)      the agent drives the Gemini Interactions API
