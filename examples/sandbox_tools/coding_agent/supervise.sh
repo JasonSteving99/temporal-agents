@@ -74,6 +74,18 @@ TS_PROXY_ADDR="${TS_PROXY_ADDR:-localhost:1055}"
 TS_ENV_FILE="${TS_ENV_FILE:-/home/daytona/tailscale.env}"
 TS_HOSTNAME="${TAILSCALE_HOSTNAME:-agent-$(hostname)}"
 
+# The daemon's own view of whether it has an identity: NeedsLogin / Stopped / Running / Starting,
+# or empty if the daemon isn't answering yet. `tailscale status` (non-JSON) can't be used for this —
+# it exits 1 both for "no daemon at all" and for the perfectly-healthy "Logged out." that a first
+# boot reports, which are opposite situations. Parsed with grep/sed rather than a JSON tool because
+# this image is not guaranteed to have one, and the field is a flat string.
+backend_state() {
+  tailscale --socket="$TS_SOCK" status --json 2>/dev/null \
+    | grep -o '"BackendState"[[:space:]]*:[[:space:]]*"[^"]*"' \
+    | head -1 \
+    | sed 's/.*"\([^"]*\)"$/\1/'
+}
+
 start_tailscale() {
   if ! command -v tailscaled >/dev/null 2>&1; then
     log "tailscale: not installed; skipping"
@@ -113,31 +125,56 @@ start_tailscale() {
   fi
 
   # tailscaled needs a moment before its socket accepts commands; `tailscale up` against a
-  # not-yet-listening socket fails immediately rather than waiting for it. Waiting on the socket
-  # FILE (not on `tailscale status`, which exits non-zero both for "no daemon" and for the
-  # perfectly-ready "Logged out" state a first boot is in) is the unambiguous signal.
+  # not-yet-listening socket fails immediately rather than waiting for it. The socket file appearing
+  # is not enough (it exists before the daemon serves on it), so wait until it actually ANSWERS —
+  # which is the same call the login decision below is made from.
   local ready=""
   for _ in $(seq 1 30); do
-    if [ -S "$TS_SOCK" ]; then ready=1; break; fi
+    if [ -n "$(backend_state)" ]; then ready=1; break; fi
     sleep 0.5
   done
-  [ -n "$ready" ] || log "tailscale: daemon socket did not appear in 15s; trying anyway"
+  [ -n "$ready" ] || log "tailscale: daemon did not answer within 15s; trying anyway"
 
-  # Prefer the state on disk: the auth key is SINGLE-USE, so it cannot be redeemed a second time
-  # after a stop -> start. Fall back to the key only if bringing the saved identity up fails.
-  # `$up_args` is deliberately unquoted — it is a list of flags, not one argument.
-  # shellcheck disable=SC2086  # $up_args is a flag list; word splitting is the point
-  if [ -s "$TS_STATE" ] && tailscale --socket="$TS_SOCK" up $up_args >>"$LOG" 2>&1; then
-    log "tailscale: up with saved node state"
-  elif [ -n "${TAILSCALE_AUTHKEY:-}" ] \
-    && tailscale --socket="$TS_SOCK" up --authkey="$TAILSCALE_AUTHKEY" $up_args >>"$LOG" 2>&1; then
-    log "tailscale: up with the auth key minted for this sandbox"
+  # Which `up` to run is decided by the DAEMON's login state, never by whether the state file
+  # exists: tailscaled writes that file (its machine key) as soon as it starts, before any login,
+  # so "file is non-empty" is true on a first boot and says nothing about having an identity.
+  # Getting this wrong is not a soft failure — a plain `tailscale up` on a logged-out node starts an
+  # INTERACTIVE login, printing an auth URL and blocking for a browser that is never coming, which
+  # hangs this supervisor before it ever launches the agent's server.
+  #
+  #   NeedsLogin  no identity (first boot, or the node was reaped) -> the auth key is the only way in
+  #   Stopped     has an identity, tailnet is just down            -> plain `up`, no key needed
+  #   Running     already up (a re-exec of this script)            -> nothing to do
+  local state
+  state=$(backend_state)
+  log "tailscale: backend state is ${state:-unknown}"
+
+  # --timeout bounds every path, so no failure mode here can block the supervisor. $up_args is
+  # deliberately unquoted: it is a list of flags, not one argument.
+  # shellcheck disable=SC2086
+  if [ "$state" = "Running" ]; then
+    log "tailscale: already up"
+  elif [ "$state" = "Stopped" ]; then
+    if tailscale --socket="$TS_SOCK" up --timeout=30s $up_args >>"$LOG" 2>&1; then
+      log "tailscale: up with saved node state"
+    else
+      log "tailscale: saved node state would not come up; continuing without the tailnet"
+      return
+    fi
+  elif [ -n "${TAILSCALE_AUTHKEY:-}" ]; then
+    if tailscale --socket="$TS_SOCK" up --authkey="$TAILSCALE_AUTHKEY" --timeout=30s $up_args \
+      >>"$LOG" 2>&1; then
+      log "tailscale: up with the auth key minted for this sandbox"
+    else
+      # The likely cause on a RESTARTED sandbox: the key is single-use and was already redeemed, and
+      # the node was ephemeral, so the tailnet reaped it once it went offline — no identity left and
+      # no second key to redeem. Mint a reusable key (see tailscale.py) if sandboxes need to rejoin
+      # after long stops. See $LOG for what tailscale actually said.
+      log "tailscale: auth key was refused; continuing without the tailnet"
+      return
+    fi
   else
-    # The common cause on a RESTARTED sandbox: the key was single-use and already redeemed, and the
-    # node was ephemeral, so the tailnet reaped it once it went offline — leaving on-disk state the
-    # coordination server no longer recognises. Mint a reusable key (see tailscale.py) if you need
-    # sandboxes to rejoin after long stops.
-    log "tailscale: could not bring the tailnet up; continuing without it"
+    log "tailscale: no identity and no auth key; continuing without the tailnet"
     return
   fi
 
