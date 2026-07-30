@@ -167,9 +167,16 @@ library insists on and the gateway ignores:
 
 ```python
 from google import genai
+
 client = genai.Client(api_key="unused", http_options={"base_url": "http://llm"})
-client.models.generate_content(model="gemini-3.6-flash", contents="...")
+resp = client.models.generate_content(model="gemini-3.6-flash", contents="...")
+print(resp.text)
 ```
+
+`api_key="unused"` is not decorative: the library refuses to construct a client without one, and the
+gateway ignores it. The instruction also gives the async form (`client.aio.models.generate_content`)
+and how to pass a system prompt, because those are the two things a model reaches for next and would
+otherwise debug against a gateway that gives no hints.
 
 Two things the instruction is emphatic about, because both are easy to get wrong:
 

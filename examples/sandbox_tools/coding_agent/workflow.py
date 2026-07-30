@@ -121,15 +121,24 @@ This sandbox can reach a **pre-authenticated Gemini gateway** at {AI_GATEWAY_URL
 exists or is needed; access is granted by the sandbox itself. Use it whenever the user asks for AI \
 features. Models available, best first: {AI_GATEWAY_MODELS}.
 
-Use the `google-genai` library (`pip install google-genai`) pointed at the gateway:
+Use the `google-genai` library (`pip install google-genai`) pointed at the gateway. This is the \
+whole pattern — it runs as-is, so don't go looking for credentials or a different endpoint:
 ```python
 from google import genai
+
 client = genai.Client(api_key="unused", http_options={{"base_url": "{AI_GATEWAY_URL}"}})
-resp = client.models.generate_content(model="{AI_GATEWAY_MODELS.split(",")[0].strip()}", contents="...")
-print(resp.text)
+resp = client.models.generate_content(
+    model="{AI_GATEWAY_MODELS.split(",")[0].strip()}",
+    contents="Summarise this in one sentence: ...",
+)
+print(resp.text)          # the reply, as a plain string
 ```
-`api_key` is a placeholder the library insists on and the gateway ignores — never ask the user for a \
-key, and never put one in the code.
+`api_key="unused"` is required: the library refuses to construct a client without one, and the \
+gateway ignores it. Never ask the user for a key and never put one in the code — there isn't one.
+
+In an async server: `await client.aio.models.generate_content(...)`, same arguments. For a system \
+prompt: `config=types.GenerateContentConfig(system_instruction="...")` with \
+`from google.genai import types`.
 
 Call it from your **server-side code only** (the process `start.sh` starts). The gateway is reachable \
 from inside this sandbox, NOT from the user's browser, so a client-side `fetch()` to it from a \
