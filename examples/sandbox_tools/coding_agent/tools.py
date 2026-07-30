@@ -39,6 +39,12 @@ PREVIEW_BASE_DOMAIN = os.environ.get("PREVIEW_BASE_DOMAIN", "").strip().lower()
 # the preview proxy (see preview/).
 PROJECT_ROOT = Path("/home/user/project")
 
+# The env var the sandbox exposes its own id under. The agent reads it to build the preview URL
+# (workflow.py interpolates this name into the system instruction rather than hardcoding one, which is
+# how a stale Daytona-era `$DAYTONA_SANDBOX_ID` survived the move to E2B and silently produced
+# unroutable preview URLs — the id came back empty).
+SANDBOX_ID_ENV_VAR = "E2B_SANDBOX_ID"
+
 # The template's IDENTITY: the fields the image is built from. Everything that must agree between
 # build time and run time lives here, in one object, so the two can't drift — the offline build
 # (`build_sandbox(SANDBOX, backend=SANDBOX_BACKEND)`) and the runtime provider (tailscale.py, which
