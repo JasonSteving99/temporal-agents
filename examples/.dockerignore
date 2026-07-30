@@ -1,0 +1,14 @@
+# Excluded from the sandbox build context — and, more importantly, from the CONTENT HASH that names
+# the E2B template / Daytona snapshot (remote-box's image_name() honors this file, rooted here at
+# examples/, because examples/ is the SandboxConfig's local_project_root).
+#
+# Without this, editing any file anywhere under examples/ — including a README, or a stray
+# __pycache__ — changes the image name, so the prebuilt image "disappears" and the next run fails
+# `require_prebuilt` (E2B: "template 'sandboxed-coding-agent-<hash>' not found") until you rebuild.
+# Prose has no business invalidating an image, so it is excluded here.
+#
+# Only exclude things the Dockerfiles never COPY. Both sandbox Dockerfiles copy an explicit list of
+# .py files plus one .sh, so none of these patterns can remove something the image needs.
+**/__pycache__
+**/*.pyc
+**/*.md

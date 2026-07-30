@@ -7,31 +7,31 @@ image from GHCR — nothing is built on the host.
 | Service | What it does | Host port |
 | --- | --- | --- |
 | `server` | FastAPI API + browser UI (the site you open) | `3010` |
-| `worker` | The agent worker; its tools run in Daytona's cloud | — |
+| `worker` | The agent worker; its tools run in E2B's cloud | — |
 | `session-manager` | Launches the agent as a child workflow | — |
 | `preview-proxy` | Serves web apps the agent builds inside a sandbox | `3011` |
 
 The image is built and pushed to `ghcr.io/<owner>/<repo>` by
 [`.github/workflows/build-image.yml`](../.github/workflows/build-image.yml) on every push to
-`main`. That same workflow also builds the **Daytona snapshot** the tools run in (from the
-image it just pushed, so the snapshot's content hash matches what the deployed worker looks up) — so
-you normally don't run the snapshot build by hand.
+`main`. That same workflow also builds the **E2B template** the tools run in (from the image it just
+pushed, so the template's content hash matches what the deployed worker looks up) — so you normally
+don't run the template build by hand.
 
 ## Prerequisites
 
 - Docker + the Compose plugin on the host.
 - A **Temporal Cloud** namespace + an API key (or client cert for mTLS).
-- `GEMINI_API_KEY` and `DAYTONA_API_KEY`.
+- `GEMINI_API_KEY` and `E2B_API_KEY` (plus `TAILSCALE_API_KEY` if you want sandboxes on your tailnet).
 - The GHCR image published (below).
 - For live preview: a **domain you control**, a **wildcard DNS record** `*.<preview-domain>` pointing
   at this host, and a reverse proxy that terminates wildcard TLS (see *Preview subdomains* below).
 
-## One-time: CI, image, and snapshot
+## One-time: CI, image, and template
 
-1. Add a **`DAYTONA_API_KEY`** repo secret (Settings → Secrets and variables → Actions) — the
-   workflow's snapshot-build step needs it.
+1. Add an **`E2B_API_KEY`** repo secret (Settings → Secrets and variables → Actions) — the
+   workflow's template-build step needs it.
 2. Push to `main` (or run the workflow manually via *Actions → build-image → Run workflow*). The run
-   pushes the image **and** builds the Daytona snapshot.
+   pushes the image **and** builds the E2B template.
 3. Make the image package public so the host can pull without logging in:
    > GitHub → your profile → **Packages** → the `temporal-agents` container → **Package
    > settings** → **Change visibility** → **Public**.
@@ -42,7 +42,7 @@ you normally don't run the snapshot build by hand.
 From this `deploy/` directory:
 
 ```bash
-cp .env.example .env                          # fill GEMINI_API_KEY, DAYTONA_API_KEY, PREVIEW_BASE_DOMAIN
+cp .env.example .env                          # fill GEMINI_API_KEY, E2B_API_KEY, PREVIEW_BASE_DOMAIN
 cp temporal.cloud.toml.example temporal.toml  # fill Temporal Cloud address / namespace / api_key
 ```
 
@@ -67,8 +67,8 @@ docker compose up -d
 docker compose logs -f            # watch them connect to Temporal Cloud
 ```
 
-The Daytona snapshot is already built by CI. If you need to (re)build it from the host instead —
-e.g. you're iterating without CI — run the one-shot (needs only `DAYTONA_API_KEY`):
+The E2B template is already built by CI. If you need to (re)build it from the host instead —
+e.g. you're iterating without CI — run the one-shot (needs only `E2B_API_KEY`):
 
 ```bash
 docker compose --profile setup run --rm build-sandbox
@@ -174,7 +174,7 @@ wildcard DNS record and wildcard Caddy block already route it, and the session c
 it. No new DNS record, no new Caddy block, no new Firebase authorized domain.
 
 **Signing in is not enough to reach it.** Previews only cost a sandbox wake; the agent spends model
-tokens and Daytona compute on every message, so it takes the **admin** or **agent** tier — a
+tokens and sandbox compute on every message, so it takes the **admin** or **agent** tier — a
 preview-tier member can browse your sites but not run the agent. Grant the agent tier from the
 [admin panel](#adding-people). Someone without it gets a plain "Agent access required" page rather
 than a redirect to sign-in, which would only loop them back.
@@ -215,7 +215,7 @@ moments a sandbox is *already* awake and the capture is therefore free:
 **Refresh** on a tile forces a new screenshot and *will* wake the sandbox if it's stopped — the only
 control here that can cost you anything, and the button says so. **Forget** (admins only) drops an
 app from the gallery; it never touches the sandbox, and the app re-registers if anyone visits it
-again. Dead sandboxes aren't pruned automatically — a transient Daytona error is indistinguishable
+again. Dead sandboxes aren't pruned automatically — a transient E2B error is indistinguishable
 enough from "deleted" that auto-removal would eventually eat live entries — so stale tiles are left
 showing their age for you to Forget.
 
@@ -247,7 +247,7 @@ never admin — and members can't promote themselves or each other. There is del
 admin" button; adding one would collapse the tiers into one.
 
 Be deliberate with the **agent** tier specifically. It's the only thing the panel can grant that
-spends money — model tokens and Daytona compute — where the other tiers only cost you a sandbox
+spends money — model tokens and sandbox compute — where the other tiers only cost you a sandbox
 wake. The panel asks for confirmation before granting it. It still can't grant the ability to grant,
 so the worst case is a bill, not a takeover.
 
@@ -283,6 +283,10 @@ docker compose pull && docker compose up -d
   Put them behind a firewall and a reverse proxy with TLS + your own auth before real use.
 - Secrets live in `.env` / `temporal.toml` on the host — keep them `chmod 600` and off version control
   (already gitignored).
+- **Preview URLs cannot be shared past the sign-in.** Sandboxes are created with
+  `allow_public_traffic=False`, so a sandbox's own `https://<port>-<id>.e2b.app` URL returns 403 to
+  everyone; only the proxy holds the traffic token. This is stronger than the Daytona setup it
+  replaced, where the preview token travelled inside the links themselves.
 - **The tailnet tag is a grant to agent-written code.** A sandbox on your tailnet reaches whatever
   your ACLs allow `TAILSCALE_TAG`, and what runs in that sandbox is whatever an LLM decided to write
   — including in response to text it read off the internet. Grant the tag the narrowest access that

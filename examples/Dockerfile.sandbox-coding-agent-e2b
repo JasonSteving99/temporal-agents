@@ -1,0 +1,124 @@
+# E2B template for examples/sandbox_tools/coding_agent (see that example's tools.py SANDBOX_BACKEND).
+# The E2B counterpart of Dockerfile.sandbox-coding-agent (Daytona), which it otherwise mirrors: same
+# build context (examples/, the lowest common ancestor of this example's tools.py and the shared
+# coding_agent_common/tool_impls.py it imports), same deps, same layout under /app.
+#
+# WHY E2B RATHER THAN DAYTONA: Daytona restricts sandbox egress to a fixed allowlist of "essential
+# services" on tiers 1-2, and the restriction cannot be overridden at the org or sandbox level
+# (HTTP 400 "Network access is restricted and cannot be overridden at the sandbox level"). Tailscale's
+# control plane is not on that list, so `tailscaled` never reaches controlplane.tailscale.com and the
+# node can never log in. E2B has no such filter, and it has /dev/net/tun, so the tailnet works with a
+# real interface (transparent routing + MagicDNS, no SOCKS proxy).
+#
+# Build offline/CI only, never at runtime (SandboxConfig.require_prebuilt).
+#
+# ------------------------------------------------------------------------------------------------
+# There is NO ENTRYPOINT/CMD here, deliberately
+# ------------------------------------------------------------------------------------------------
+# An E2B template's start command runs ONCE WHILE THE TEMPLATE BUILDS; E2B then snapshots the VM with
+# that process still running, and every sandbox resumes from the snapshot. So it starts before any
+# sandbox — and before any per-sandbox env var — exists, and cannot see one. remote-box's
+# `from_dockerfile` translates a Dockerfile CMD/ENTRYPOINT into exactly that start command (and then
+# overrides it), so a CMD here would be silently ignored.
+#
+# The tailnet bring-up therefore runs from `post_create_cmd` instead — fired once per sandbox after
+# creation, as root, backgrounded, and it DOES inherit `env_vars` (that's where TAILSCALE_AUTHKEY
+# arrives). The script it runs is baked in below; only the credential is passed at runtime.
+
+FROM ghcr.io/astral-sh/uv:python3.12-trixie-slim
+
+WORKDIR /app
+
+# git: uv shells out to it for the harness git dependency. curl/gnupg: the Tailscale repo below.
+# sudo: E2B's default sandbox user is unprivileged (uid 1000), and while post_create_cmd runs as root,
+# anything the agent itself needs to do privileged goes through sudo.
+# procps is for the agent's own use (`ps`, and tailscale_up.sh's `pkill`); the slim base has neither.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git curl ca-certificates gnupg sudo procps \
+    && rm -rf /var/lib/apt/lists/*
+
+# E2B runs sandboxes as the user `user` (uid 1000) unless a command names another. The uv base image
+# has no such user, so create it — with passwordless sudo, matching E2B's own base templates.
+RUN id -u user >/dev/null 2>&1 || useradd -m -u 1000 -s /bin/bash user \
+    && echo 'user ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/user \
+    && chmod 0440 /etc/sudoers.d/user
+
+# Tailscale, from Tailscale's own Debian repo (the distro's lags). `trixie` must match this image's
+# Debian release — the uv base is python3.12-trixie-slim — so bump both together.
+#
+# policy-rc.d returning 101 is the standard Debian image-build trick to stop a package's postinst from
+# STARTING the service it just installed. It is load-bearing here, not hygiene: E2B snapshots the VM
+# at the end of the build with every running process intact, so a tailscaled started during the build
+# is resumed inside every sandbox — holding /run/tailscale/tailscaled.sock with a network that died
+# with the build VM. The symptom is baffling: our own tailscaled fails with "address already in use"
+# and exits, while the `tailscale` CLI talks to the wedged build-time daemon and reports
+# "Tailscale cannot connect because the network is down" even though egress is perfectly fine.
+RUN printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d \
+    && chmod +x /usr/sbin/policy-rc.d \
+    && curl -fsSL https://pkgs.tailscale.com/stable/debian/trixie.noarmor.gpg \
+        -o /usr/share/keyrings/tailscale-archive-keyring.gpg \
+    && curl -fsSL https://pkgs.tailscale.com/stable/debian/trixie.tailscale-keyring.list \
+        -o /etc/apt/sources.list.d/tailscale.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends tailscale \
+    && rm -f /usr/sbin/policy-rc.d \
+    && rm -rf /var/lib/apt/lists/*
+
+# MASK the packaged systemd unit. E2B runs systemd as PID 1, and the Debian package enables
+# tailscaled.service, so systemd starts its OWN tailscaled at every sandbox boot — racing the one
+# tailscale-up.sh starts. Worse than a plain race: the unit's ExecStartPre runs `tailscaled --cleanup`,
+# which DELETES the socket. So our daemon binds, gets its socket removed underneath it seconds later,
+# and every subsequent `tailscale` call fails with "dial unix .../tailscaled.sock: no such file or
+# directory" while a tailscaled is plainly running. Symlinking the unit to /dev/null is `systemctl
+# mask` done offline (systemd isn't running at build time), and dropping the wants/ symlink stops it
+# being pulled in by multi-user.target.
+#
+# One daemon, owned by our script. If you ever prefer systemd to own it instead, unmask this and cut
+# the daemon-start from the script — but then the dummy address must exist BEFORE the unit starts, or
+# the netmon problem the script documents comes back.
+RUN ln -sf /dev/null /etc/systemd/system/tailscaled.service \
+    && rm -f /etc/systemd/system/multi-user.target.wants/tailscaled.service
+
+# Any tailscaled the build managed to start is killed, and its state file DELETED. A tailscaled.state
+# baked into the template would hand every sandbox the same node identity — they'd fight over one
+# machine in the tailnet instead of each joining as itself.
+RUN pkill -x tailscaled 2>/dev/null || true; \
+    rm -f /run/tailscale/tailscaled.sock /var/run/tailscale/tailscaled.sock \
+          /var/lib/tailscale/tailscaled.state /var/lib/tailscale/tailscaled.log.conf; \
+    mkdir -p /var/lib/tailscale /var/run/tailscale
+
+# The one Python dependency (the harness + `sandbox` extra) into /app/.venv, which is where the E2B
+# backend expects the interpreter (remote.backends.e2b's PYTHON_CMD = /app/.venv/bin/python). No
+# uv.lock is committed for it — the commit SHA pinned in that pyproject is the whole pin; see
+# "Updating the harness" in Dockerfile.sandbox-coding-agent.
+COPY sandbox_tools/coding_agent/pyproject.toml ./
+RUN uv sync --no-install-project
+
+# The tool module + the shared impls it imports, at the exact dotted paths remote-box re-imports
+# inside the sandbox (examples.sandbox_tools.coding_agent.tools ->
+# examples.coding_agent_common.tool_impls). /app is WORKDIR, hence on sys.path.
+#
+# Written as one file-to-FILE COPY per file, with the destination dirs pre-created. The Daytona
+# Dockerfile's more natural form — several sources into one trailing-slash directory — fails on E2B's
+# builder with "failed to move files in sandbox: exit status 1": unlike Docker, it does not create the
+# destination directory, and it mishandles multi-source COPY (the build log echoed only the first
+# source). Do not "simplify" these back into grouped COPYs.
+RUN mkdir -p /app/examples/coding_agent_common /app/examples/sandbox_tools/coding_agent
+COPY coding_agent_common/__init__.py ./examples/coding_agent_common/__init__.py
+COPY coding_agent_common/tool_impls.py ./examples/coding_agent_common/tool_impls.py
+COPY sandbox_tools/__init__.py ./examples/sandbox_tools/__init__.py
+COPY sandbox_tools/coding_agent/__init__.py ./examples/sandbox_tools/coding_agent/__init__.py
+COPY sandbox_tools/coding_agent/tools.py ./examples/sandbox_tools/coding_agent/tools.py
+
+# The boot sequence run by post_create_cmd: boot.sh -> tailscale_up.sh (join the tailnet with the
+# per-sandbox key) then supervise.sh (run/restart the agent's start.sh, which is what makes a site
+# previewable). Baked into the image, so the template's content hash covers them and editing one
+# forces a rebuild, rather than passed as command strings.
+COPY sandbox_tools/coding_agent/boot.sh /usr/local/bin/boot.sh
+COPY sandbox_tools/coding_agent/tailscale_up.sh /usr/local/bin/tailscale-up.sh
+COPY sandbox_tools/coding_agent/supervise.sh /usr/local/bin/supervise.sh
+RUN chmod +x /usr/local/bin/boot.sh /usr/local/bin/tailscale-up.sh /usr/local/bin/supervise.sh
+
+# The (initially empty) project dir the agent works in — must match tools.py's PROJECT_ROOT. Tools run
+# as root, but keep it group/other-writable so anything the agent runs as `user` can write too.
+RUN mkdir -p /home/user/project && chmod 777 /home/user/project

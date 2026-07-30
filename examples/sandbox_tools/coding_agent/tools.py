@@ -1,5 +1,5 @@
 # ABOUTME: The sandboxed coding agent's six tools + the SandboxConfig picking their backend. Each is
-# a @agent.activity_tool_defn(sandboxed=True) tool whose body runs INSIDE a Daytona sandbox, against
+# a @agent.activity_tool_defn(sandboxed=True) tool whose body runs INSIDE an E2B sandbox, against
 # a project living in the box (PROJECT_ROOT). The actual work is the SHARED
 # examples.coding_agent_common.tool_impls — the same code the callback coding agent runs on the
 # user's laptop; here it just runs in the cloud sandbox instead. Kept a plain (non-workflow) module:
@@ -15,7 +15,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from pydantic import BaseModel
-from remote import Daytona
+from remote import E2B
 from temporalio.workflow import ActivityConfig
 
 from temporal_agent_harness.harness import agent
@@ -32,27 +32,57 @@ from examples.coding_agent_common import tool_impls
 PREVIEW_BASE_DOMAIN = os.environ.get("PREVIEW_BASE_DOMAIN", "").strip().lower()
 
 # The project the agent works on lives HERE, inside the sandbox (created by the Dockerfile). Starts
-# empty — the agent scaffolds a project from scratch. The live-preview supervisor runs whatever the
-# agent writes to start.sh IN THIS DIR (supervise.sh's START_FILE = <PROJECT_ROOT>/start.sh — it must
-# be under the project root so the confined `write` tool can create it), so the agent can build a web
-# app here and serve it for the preview proxy (see preview/ and supervise.sh).
-PROJECT_ROOT = Path("/home/daytona/project")
+# empty — the agent scaffolds a project from scratch. Under /home/user because that is E2B's sandbox
+# user's home (the Daytona backend used /home/daytona). The live-preview supervisor (supervise.sh, run
+# by boot.sh) launches whatever the agent writes to <PROJECT_ROOT>/start.sh — it must be under the
+# project root so the confined `write` tool can create it — so the agent can serve a web app here for
+# the preview proxy (see preview/).
+PROJECT_ROOT = Path("/home/user/project")
 
-# The snapshot's IDENTITY: the fields the image is built from. Everything that must agree between
+# The template's IDENTITY: the fields the image is built from. Everything that must agree between
 # build time and run time lives here, in one object, so the two can't drift — the offline build
 # (`build_sandbox(SANDBOX, backend=SANDBOX_BACKEND)`) and the runtime provider (tailscale.py, which
 # `model_copy`s this and adds env_vars) both take it from this single definition. Drift would fail
 # activation's `require_prebuilt` check.
-SANDBOX_BACKEND = Daytona(
-    snapshot_name="sandboxed-coding-agent",
-    dockerfile_path="Dockerfile.sandbox-coding-agent",
+#
+# E2B, not Daytona: Daytona restricts sandbox egress to a fixed "essential services" allowlist on
+# tiers 1-2 and refuses to let it be overridden at either the org or the sandbox level, so
+# `tailscaled` can never reach controlplane.tailscale.com and the sandbox can never join the tailnet.
+# E2B has no such filter (and has /dev/net/tun, so the tailnet gets a real interface). The Daytona
+# config + its Dockerfile are kept in the tree for reference; see Dockerfile.sandbox-coding-agent-e2b.
+#
+# post_create_cmd runs boot.sh: join the tailnet, then supervise the agent's start.sh (what makes a
+# site previewable). It's fired once after creation, as root, backgrounded, and inherits `env_vars` —
+# so it sees the TAILSCALE_AUTHKEY the provider minted.
+# A template START command could not: E2B runs that while the TEMPLATE builds and snapshots the
+# running process into every sandbox, so it starts before any sandbox env exists (and remote-box
+# translates a Dockerfile CMD/ENTRYPOINT into exactly that, then overrides it — hence no CMD in the
+# Dockerfile). The script is baked into the image so the template hash covers it.
+SANDBOX_BACKEND = E2B(
+    template_prefix="sandboxed-coding-agent",
+    dockerfile_path="Dockerfile.sandbox-coding-agent-e2b",
+    post_create_cmd="/usr/local/bin/boot.sh",
+    # Previews must not be shareable past the proxy's sign-in. With this False, E2B gates the
+    # sandbox's own https://<port>-<id>.e2b.app URL behind a traffic token that ONLY the preview
+    # proxy holds (it recovers it via connect(); see preview/proxy.py) — anyone else gets 403. Left
+    # True (E2B's default) that URL is world-readable to anyone who knows the sandbox id, which the
+    # gallery shows to every signed-in viewer, so the Firebase gate would be trivially bypassable.
+    # Settable only at creation: E2B's update_network cannot change it afterwards.
+    allow_public_traffic=False,
+    # Installs/builds/tests need more than the 1 CPU / 1 GiB default.
+    cpu_count=2,
+    memory_mb=2048,
+    # Refreshed before every call, so this bounds only how long a session may sit IDLE before its
+    # sandbox is reclaimed — not the session's total length. Generous because a user thinking between
+    # turns must not cost them the box.
+    sandbox_ttl_seconds=1800,
 )
 
 # The ONE place this agent's sandbox backend is chosen (never the tools themselves). Runs on a real
-# Daytona cloud sandbox. local_project_root is the `examples/` dir (Path parents up from this file):
-# the snapshot is built from BOTH this example's tools.py and the shared coding_agent_common, whose
-# lowest common ancestor is examples/ — see examples/Dockerfile.sandbox-coding-agent for why the
-# Dockerfile lives there. Needs DAYTONA_API_KEY and a prebuilt snapshot (`just build-sandbox`).
+# E2B cloud sandbox. local_project_root is the `examples/` dir (Path parents up from this file): the
+# template is built from BOTH this example's tools.py and the shared coding_agent_common, whose lowest
+# common ancestor is examples/ — see examples/Dockerfile.sandbox-coding-agent-e2b for why the
+# Dockerfile lives there. Needs E2B_API_KEY and a prebuilt template (`just build-sandbox`).
 #
 # `backend` is a provider NAME, not the config above: each sandbox needs its own freshly minted
 # Tailscale auth key in its environment, which takes an HTTP call and so cannot be stated as a
@@ -64,7 +94,7 @@ SANDBOX_BACKEND = Daytona(
 # Offline builds can't run a provider (there's no worker), so they pass the config explicitly:
 # `build_sandbox(SANDBOX, backend=SANDBOX_BACKEND)`.
 SANDBOX = SandboxConfig(
-    backend="daytona-tailscale",  # == tailscale.PROVIDER_NAME (a literal: see the import note above)
+    backend="e2b-tailscale",  # == tailscale.PROVIDER_NAME (a literal: see the import note above)
     local_project_root=Path(__file__).parent.parent.parent,  # -> examples/
 )
 

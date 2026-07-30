@@ -1,12 +1,13 @@
 """
-Daytona custom preview proxy for the sandboxed coding agent — SUBDOMAIN routing.
+Custom preview proxy for the sandboxed coding agent — SUBDOMAIN routing.
 
-Purpose: sit in front of Daytona's preview endpoint so a stopped CONTAINER
-sandbox is woken on demand and the server (relaunched by the snapshot's
-supervise.sh entrypoint) is actually listening before we forward. That
-start-and-wait gate is what makes a stopped-then-woken sandbox serve traffic
-seamlessly, so you can build a web app inside the sandbox via the chat agent and
-preview it live.
+Purpose: sit in front of the sandbox's own e2b.app endpoint so a PAUSED sandbox is
+resumed on demand and its server is actually listening before we forward, and so
+that endpoint stays private — the sandbox is created with allow_public_traffic=False
+and only this proxy holds the traffic token, so previews can't be shared past the
+sign-in. E2B's pause preserves memory, so the server the agent started is still
+running on resume; the wait gate covers the resume itself. Net effect: build a web
+app inside the sandbox via the chat agent and preview it live.
 
 Routing is by SUBDOMAIN (parsed from the Host header), not by path:
 
@@ -14,7 +15,7 @@ Routing is by SUBDOMAIN (parsed from the Host header), not by path:
 
 e.g. https://abc123-3000.preview.example.com/assets/app.js . The leftmost DNS
 label encodes the target: `<sandboxId>-<port>` (split on the LAST hyphen, since
-Daytona ids may contain hyphens and the port is always the trailing number).
+sandbox ids may contain hyphens and the port is always the trailing number).
 The request path is forwarded UNCHANGED to the sandbox, so a site that
 references absolute roots (`/assets/app.js`, `/style.css`) works exactly as it
 would when served normally — no `<base href>`, no relative-path gymnastics, no

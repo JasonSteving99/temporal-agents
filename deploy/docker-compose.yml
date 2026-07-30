@@ -5,9 +5,9 @@
 # config (Temporal connection, large-payload settings) lives in .env so it isn't repeated here.
 #
 # Setup + run: see ./README.md. TL;DR:
-#   cp .env.example .env                       # fill GEMINI_API_KEY, DAYTONA_API_KEY
+#   cp .env.example .env                       # fill GEMINI_API_KEY, E2B_API_KEY
 #   cp temporal.cloud.toml.example temporal.toml   # fill Temporal Cloud address/namespace/api_key
-#   docker compose --profile setup run --rm build-sandbox   # once: build the Daytona snapshot
+#   docker compose --profile setup run --rm build-sandbox   # once: build the E2B template
 #   docker compose up -d
 
 name: coding-agent
@@ -49,8 +49,9 @@ services:
     depends_on: [session-manager]
     restart: unless-stopped
 
-  # The agent worker. Its bash/read/write/edit/grep/glob tools run in Daytona's CLOUD (needs
-  # DAYTONA_API_KEY), so no Docker-in-Docker here. Needs GEMINI_API_KEY for the Gemini API.
+  # The agent worker. Its bash/read/write/edit/grep/glob tools run in E2B's CLOUD (needs E2B_API_KEY),
+  # so no Docker-in-Docker here. Needs GEMINI_API_KEY for the Gemini API, and TAILSCALE_API_KEY if you
+  # want each sandbox on your tailnet.
   worker:
     image: *image
     command: ["python", "-m", "examples.sandbox_tools.coding_agent.worker"]
@@ -63,7 +64,7 @@ services:
   # SUBDOMAIN: a request to <sandboxId>-<port>.$PREVIEW_BASE_DOMAIN is forwarded to that sandbox's
   # port, so previewed sites work like normal sites (absolute asset paths, client routing). Put a
   # reverse proxy in front that terminates wildcard TLS for *.$PREVIEW_BASE_DOMAIN and forwards here
-  # PRESERVING the Host header (see README). Standalone — needs DAYTONA_API_KEY only, no Temporal.
+  # PRESERVING the Host header (see README). Standalone — needs E2B_API_KEY only, no Temporal.
   # Previews are gated by Firebase Google sign-in once FIREBASE_API_KEY is set in .env; with it
   # blank, previews are open to anyone. Admins (PREVIEW_ADMIN_EMAILS) manage who else gets in, and
   # at which tier, from the panel at https://$PREVIEW_BASE_DOMAIN/__auth/admin (see README).
@@ -107,9 +108,10 @@ services:
       - large-payloads:/data/large-payloads
     restart: unless-stopped
 
-  # One-shot: build the Daytona snapshot the tools run on. Run ONCE before `up` (and again whenever
-  # tools.py / coding_agent_common/tool_impls.py / the snapshot Dockerfile change). Needs only
-  # DAYTONA_API_KEY. Not started by `up` (setup profile):
+  # One-shot: build the E2B template the tools run on. Run ONCE before `up` (and again whenever
+  # anything under examples/ that the template hash covers changes — tools.py, tool_impls.py, the
+  # Dockerfile, boot.sh/supervise.sh/tailscale_up.sh; *.md and __pycache__ are excluded by
+  # examples/.dockerignore). Needs only E2B_API_KEY. Not started by `up` (setup profile):
   #   docker compose --profile setup run --rm build-sandbox
   #
   # SANDBOX.backend is a provider NAME (it mints a Tailscale key per sandbox), and a provider can't

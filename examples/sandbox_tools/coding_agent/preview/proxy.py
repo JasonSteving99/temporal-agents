@@ -1,6 +1,6 @@
 """
-The proxying itself: parse the Host header into a sandbox, wake it if it's
-stopped, wait for its server to bind, then forward the request unchanged.
+The proxying itself: parse the Host header into a sandbox, resume it if it's
+paused, wait for its server to bind, then forward the request unchanged.
 
 Also home to the Caddy `on_demand_tls` check, which decides which hostnames are
 worth issuing a certificate for.
@@ -9,7 +9,7 @@ worth issuing a certificate for.
 import asyncio
 
 from aiohttp import ClientSession, WSMsgType, web
-from daytona import AsyncDaytona, DaytonaConfig, SandboxState
+from e2b import AsyncSandbox
 from yarl import URL
 
 from .config import (
@@ -18,27 +18,14 @@ from .config import (
     AGENT_UPSTREAM,
     AUTH_HOST,
     AUTO_STOP_MINUTES,
-    DAYTONA_API_KEY,
-    DAYTONA_TARGET,
+    E2B_API_KEY,
     PREVIEW_BASE_DOMAIN,
+    SANDBOX_TIMEOUT_SECONDS,
 )
 from .pages import DENIED_PAGE
 from .registry import app_key, registry
 from .screenshots import schedule_capture
 from .session import can_use_agent, is_authed, redirect_to_login
-
-
-def _make_daytona() -> AsyncDaytona:
-    # One shared client for the whole process. The async client opens a single
-    # state-streaming websocket that all sandboxes share, so do NOT construct one
-    # per request — build it once and close it on shutdown.
-    kwargs = {"api_key": DAYTONA_API_KEY}
-    if DAYTONA_TARGET:
-        kwargs["target"] = DAYTONA_TARGET
-    return AsyncDaytona(DaytonaConfig(**kwargs))
-
-
-daytona = _make_daytona()
 
 # Headers that must not be blindly copied through a proxy.
 HOP_BY_HOP = {
@@ -46,15 +33,47 @@ HOP_BY_HOP = {
     "te", "trailers", "transfer-encoding", "upgrade", "host", "content-length",
 }
 
-# Reserved Daytona ports to NEVER route to unless you mean it:
-#   22222 = web terminal, 2280 = toolbox, 33333 = recording dashboard.
-RESERVED_PORTS = {22222, 2280, 33333}
+# Reserved E2B ports to NEVER route to unless you mean it:
+#   49983 = envd (the sandbox agent the SDK itself talks to), 50005 = MCP gateway.
+RESERVED_PORTS = {49983, 50005}
 
-# Sandbox ids we've already applied AUTO_STOP_MINUTES to. Daytona persists the
-# setting on the sandbox, so once per id is enough; setting it on every request
-# would add a needless API round-trip. A restarted proxy just re-applies on the
-# first request it sees for each sandbox.
-_autostop_configured: set[str] = set()
+# The header E2B requires on every request to a sandbox host when that sandbox was created
+# with `allow_public_traffic=False`. It replaces Daytona's X-Daytona-Preview-Token, and is
+# a straight improvement: Daytona's token travelled in preview links, whereas this one
+# never leaves the proxy — so the sandbox's own e2b.app URL cannot be shared past the auth
+# gate. Requests without it get 403.
+TRAFFIC_TOKEN_HEADER = "e2b-traffic-access-token"
+
+
+def preview_headers(token: str) -> dict[str, str]:
+    """The auth header for upstream sandbox requests, or nothing.
+
+    Empty when the sandbox allows public traffic (nothing to authenticate with) — which is
+    what remote-box creates today, since its E2B config has no way to pass
+    `allow_public_traffic=False`. Previews work either way; without it the sandbox's
+    e2b.app URL is reachable by anyone who knows the sandbox id, bypassing this proxy's
+    sign-in entirely.
+    """
+    return {TRAFFIC_TOKEN_HEADER: token} if token else {}
+
+
+class Preview:
+    """What the proxy needs to talk to one sandbox port: where, and with what header.
+
+    Mirrors the shape Daytona's get_preview_link() returned (`.url` / `.token`) so the
+    gallery, screenshotter and forwarders did not have to change with the backend.
+    """
+
+    __slots__ = ("token", "url")
+
+    def __init__(self, url: str, token: str) -> None:
+        self.url = url
+        self.token = token
+
+
+# Per-sandbox idle timers that pause the sandbox (see AUTO_STOP_MINUTES). Keyed by sandbox
+# id; each request restarts its sandbox's timer.
+_idle_pausers: dict[str, asyncio.Task] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +107,7 @@ def parse_preview_host(host_header: str) -> "tuple[str, int] | None":
 # ---------------------------------------------------------------------------
 # Readiness gate: after the sandbox reports "started", the server inside it
 # still needs a moment to bind the port. Poll until it answers, or we 503.
-# We probe THROUGH Daytona's preview URL so we test the real path.
+# We probe THROUGH the sandbox's real e2b.app URL so we test the real path.
 # ---------------------------------------------------------------------------
 async def wait_for_server(
     session: ClientSession, url: str, token: str, timeout: float = 30.0
@@ -99,7 +118,7 @@ async def wait_for_server(
         try:
             async with session.head(
                 url,
-                headers={"x-daytona-preview-token": token},
+                headers=preview_headers(token),
                 allow_redirects=False,
             ) as resp:
                 # Any HTTP response means something is listening. Tune if your
@@ -113,35 +132,84 @@ async def wait_for_server(
 
 
 # ---------------------------------------------------------------------------
-# Wake the sandbox if needed, then get a FRESH preview link + token.
-# Order matters: a standard preview token is invalidated when the sandbox
-# restarts, so a token cached from before the stop is dead. Fetch it AFTER
-# start(). get_preview_link also auto-opens the port if it's closed.
+# Resume the sandbox if needed, then build its preview URL + traffic token.
 # ---------------------------------------------------------------------------
+async def _pause_when_idle(sandbox_id: str) -> None:
+    """Pause the sandbox after AUTO_STOP_MINUTES without a preview request.
+
+    E2B has no server-side idle stop, and its `timeout` KILLS rather than stops, so idling
+    is managed here. pause() preserves memory as well as disk, so the agent's server is
+    still running when the next request resumes it — no relaunch, no warm-up beyond the
+    resume itself.
+
+    Pausing a sandbox the AGENT is mid-turn on is safe: remote-box resumes on its next tool
+    call (that is what its E2B `resume` does). The cost is latency on that call, not a
+    broken session.
+    """
+    try:
+        await asyncio.sleep(AUTO_STOP_MINUTES * 60)
+        await AsyncSandbox.pause(sandbox_id=sandbox_id, api_key=E2B_API_KEY)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        # Already paused, killed, or gone — nothing to salvage, and this must never take
+        # down the request path that scheduled it.
+        pass
+    finally:
+        _idle_pausers.pop(sandbox_id, None)
+
+
+def cancel_idle_timers() -> None:
+    """Drop every pending idle-pause task. Called on shutdown.
+
+    Deliberately does NOT pause the sandboxes it was tracking: a proxy restart is not a
+    reason to suspend a session the agent may be actively using. The consequence is that a
+    sandbox resumed just before a restart keeps running until SANDBOX_TIMEOUT_SECONDS — the
+    backstop that exists for exactly this case.
+    """
+    for task in list(_idle_pausers.values()):
+        task.cancel()
+    _idle_pausers.clear()
+
+
+def _restart_idle_timer(sandbox_id: str) -> None:
+    if not AUTO_STOP_MINUTES:
+        return
+    existing = _idle_pausers.pop(sandbox_id, None)
+    if existing:
+        existing.cancel()
+    _idle_pausers[sandbox_id] = asyncio.create_task(_pause_when_idle(sandbox_id))
+
+
 async def ensure_ready(sandbox_id: str, port: int, session: ClientSession):
-    """Returns (preview, woken) — `woken` is True if we had to start the sandbox.
+    """Returns (preview, woken) — `woken` is True if the sandbox had to be resumed.
 
     Callers use `woken` to decide whether the site may have changed since its last
-    screenshot: a restart re-runs start.sh, which can pick up a newer build.
+    screenshot.
+
+    connect() both resumes a paused sandbox and refreshes its lifetime, so it is the whole
+    wake step. The state is read FIRST only to report `woken`; connect() alone can't tell
+    us whether it resumed anything.
     """
     woken = False
-    sandbox = await daytona.get(sandbox_id)
-    if sandbox.state != SandboxState.STARTED:
-        # This is where the snapshot entrypoint supervisor (supervise.sh) re-runs
-        # /home/daytona/project/start.sh and relaunches the server. start() waits until
-        # the sandbox itself is "started" (not until the server binds).
-        await sandbox.start()
-        woken = True
-    # Cap the compute bill: auto-stop after AUTO_STOP_MINUTES of no SDK activity.
-    # Daytona counts SDK interactions (state changes, process.exec, etc.) as
-    # activity but NOT preview HTTP traffic — so the agent's own tool calls keep an
-    # active chat turn alive, while a sandbox left idle (e.g. a preview tab open
-    # but quiet) stops itself. A later request just wakes it again (brief
-    # "warming up"). Set once per id; Daytona persists it.
-    if AUTO_STOP_MINUTES and sandbox_id not in _autostop_configured:
-        await sandbox.set_autostop_interval(AUTO_STOP_MINUTES)
-        _autostop_configured.add(sandbox_id)
-    preview = await sandbox.get_preview_link(port)   # -> .url, .token
+    try:
+        info = await AsyncSandbox.get_info(sandbox_id=sandbox_id, api_key=E2B_API_KEY)
+        woken = str(getattr(info, "state", "")).lower().endswith("paused")
+    except Exception:
+        # Info is a nicety; a failure here shouldn't cost us the preview. connect() below
+        # is the call that must work, and it raises usefully if the sandbox is truly gone.
+        pass
+
+    sandbox = await AsyncSandbox.connect(
+        sandbox_id, timeout=SANDBOX_TIMEOUT_SECONDS, api_key=E2B_API_KEY
+    )
+    # Empty unless the sandbox was created with allow_public_traffic=False — see
+    # preview_headers().
+    preview = Preview(
+        url=f"https://{sandbox.get_host(port)}",
+        token=sandbox.traffic_access_token or "",
+    )
+    _restart_idle_timer(sandbox_id)
     await wait_for_server(session, preview.url, preview.token)
     return preview, woken
 
@@ -193,7 +261,7 @@ async def forward(
 
 # ---------------------------------------------------------------------------
 # The agent chat app (see config.AGENT_HOST). Every message here spends model
-# tokens and Daytona compute, so viewing previews is not enough: the caller must
+# tokens and sandbox compute, so viewing previews is not enough: the caller must
 # be an admin or hold the "agent" role an admin granted them.
 # ---------------------------------------------------------------------------
 async def proxy_agent(request: web.Request, session: ClientSession) -> web.StreamResponse:
@@ -215,9 +283,8 @@ async def proxy_agent(request: web.Request, session: ClientSession) -> web.Strea
 
 
 # ---------------------------------------------------------------------------
-# WebSocket passthrough (HMR, live reload). Daytona auto-detects the upgrade
-# and skips its warning page; we just bridge client <-> upstream and carry
-# the token + forwarded host.
+# WebSocket passthrough (HMR, live reload): bridge client <-> upstream, carrying
+# the traffic token + forwarded host.
 # ---------------------------------------------------------------------------
 async def proxy_ws(request, sandbox_id, port, path, session):
     try:
@@ -234,7 +301,7 @@ async def proxy_ws(request, sandbox_id, port, path, session):
     async with session.ws_connect(
         str(up_url),
         headers={
-            "X-Daytona-Preview-Token": preview.token,
+            **preview_headers(preview.token),
             "X-Forwarded-Host": request.headers.get("Host", ""),
         },
     ) as upstream_ws:
@@ -277,7 +344,7 @@ async def handler(request: web.Request):
     sandbox_id, port = route
 
     if port in RESERVED_PORTS:
-        return web.Response(status=403, text=f"Port {port} is reserved by Daytona.")
+        return web.Response(status=403, text=f"Port {port} is reserved by E2B.")
 
     # The auth gate (session.py). Checked BEFORE we wake anything: an unauthenticated
     # scanner must not be able to spin up sandboxes, let alone read them.
@@ -314,9 +381,10 @@ async def handler(request: web.Request):
 
     target = upstream_url(preview.url, path, request.rel_url.query)
     return await forward(request, session, target, {
-        "X-Forwarded-Host": request.headers.get("Host", ""),   # required by Daytona
-        "X-Daytona-Preview-Token": preview.token,              # fresh, post-start
-        "X-Daytona-Skip-Preview-Warning": "true",              # we own the UX
+        # Apps behind the proxy see the public host, not the e2b.app one, so generated
+        # absolute URLs point back through the gate.
+        "X-Forwarded-Host": request.headers.get("Host", ""),
+        **preview_headers(preview.token),
     })
 
 
@@ -347,7 +415,10 @@ async def check(request: web.Request) -> web.Response:
     if port in RESERVED_PORTS:
         return web.Response(status=403)
     try:
-        await daytona.get(sandbox_id)   # raises if the sandbox id doesn't exist
+        # Raises if the sandbox id doesn't exist, so Caddy never issues a certificate for a
+        # hostname nobody can serve. A PAUSED sandbox is still a real one — get_info answers
+        # for it, and connect() would resume it — so previews survive the idle pause.
+        await AsyncSandbox.get_info(sandbox_id=sandbox_id, api_key=E2B_API_KEY)
     except Exception:
         return web.Response(status=403)
     return web.Response(status=200)
@@ -376,6 +447,6 @@ async def index(request: web.Request):
             "<h1>Sandbox preview proxy</h1>"
             f"<p>Open <code>https://&lt;sandboxId&gt;-&lt;port&gt;.{base}/</code>. The chat "
             "agent prints the full URL after it builds a site — it reads the id from "
-            "<code>$DAYTONA_SANDBOX_ID</code> inside the sandbox.</p>"
+            "<code>$E2B_SANDBOX_ID</code> inside the sandbox.</p>"
         ),
     )

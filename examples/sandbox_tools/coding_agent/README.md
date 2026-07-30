@@ -29,15 +29,34 @@ config (`sandbox=SANDBOX`), the worker, and the snapshot image.
 ## Requirements
 
 - `GEMINI_API_KEY` — the agent calls the Gemini Interactions API.
-- `DAYTONA_API_KEY` — the tools run on a real Daytona cloud sandbox (also used by the preview proxy).
-- `DAYTONA_TARGET` *(optional)* — Daytona region for the preview proxy (e.g. `us`).
+- `E2B_API_KEY` — the tools run in a real E2B cloud sandbox, and `just build-sandbox` builds its template.
+- `DAYTONA_API_KEY` / `DAYTONA_TARGET` *(optional)* — only for the Daytona backend and its preview proxy.
 - `TAILSCALE_API_KEY` *(optional)* — puts each sandbox on your tailnet (see [Tailnet](#tailnet)).
 
 All go in the repo-root `.env.local` (see `.env.example`).
 
-## Backend: Daytona
+## Backend: E2B (was Daytona)
 
-The snapshot is built from `examples/Dockerfile.sandbox-coding-agent`. Unusually, that Dockerfile
+The tools run in an **E2B** sandbox, built from `examples/Dockerfile.sandbox-coding-agent-e2b`.
+
+**Why the switch.** Daytona restricts sandbox egress to a fixed "essential services" allowlist on
+tiers 1–2, and it cannot be overridden at either the organization or the sandbox level — the API
+answers `400 "Network access is restricted and cannot be overridden at the sandbox level"`, and the
+docs are explicit that org policy wins even if you specify custom allow lists. Tailscale's control
+plane isn't on that list, so `tailscaled` could never log in (it fails with
+`fetch control key: ... read: connection reset by peer`). E2B has no such filter and provides
+`/dev/net/tun`, so the tailnet works with a real interface.
+
+Two consequences worth knowing:
+
+- **The live-preview proxy was ported to E2B** and is better off for it — see
+  [Live preview](#live-preview). E2B's memory-preserving pause removes the need to relaunch a
+  server on wake, and `allow_public_traffic=False` makes preview URLs unshareable past the sign-in.
+- **The Daytona Dockerfile is kept in the tree** (`Dockerfile.sandbox-coding-agent`) for reference.
+  Nothing points at it; `supervise.sh` is now shared by both backends and does only server
+  supervision, with the tailnet in `tailscale_up.sh`.
+
+The Daytona snapshot is built from `examples/Dockerfile.sandbox-coding-agent`. Unusually, that Dockerfile
 lives at **`examples/`**, not in this example dir — because the image bakes in BOTH this example's
 `tools.py` *and* the shared `coding_agent_common/tool_impls.py`, and Daytona resolves every `COPY`
 source relative to the Dockerfile's own directory, so it must sit at the lowest common ancestor of
@@ -60,15 +79,22 @@ header of [`examples/Dockerfile.sandbox-coding-agent`](../../Dockerfile.sandbox-
 
 ## Tailnet
 
-Each sandbox joins your Tailscale tailnet on boot, as a node tagged `tag:agent-artifact`. This is
-the example's use of `SandboxConfig`'s **backend provider**: an auth key has to be minted per
-sandbox by an HTTP call, so no literal `Daytona(...)` in `tools.py` could carry one. Instead
-`tools.py` names a provider and [`tailscale.py`](tailscale.py) supplies the callable:
+Each sandbox joins your Tailscale tailnet, as a node tagged `tag:agent-artifact`. This is the
+example's use of `SandboxConfig`'s **backend provider**: an auth key has to be minted per sandbox by
+an HTTP call, so no literal `E2B(...)` in `tools.py` could carry one. Instead `tools.py` names a
+provider and [`tailscale.py`](tailscale.py) supplies the callable:
 
 ```
-tools.py      SANDBOX = SandboxConfig(backend="daytona-tailscale", ...)   # a NAME
-worker.py     sandbox_activities({PROVIDER_NAME: daytona_with_tailscale}) # the CALLABLE
+tools.py      SANDBOX = SandboxConfig(backend="e2b-tailscale", ...)    # a NAME
+worker.py     sandbox_activities({PROVIDER_NAME: e2b_with_tailscale})  # the CALLABLE
 ```
+
+The key is consumed by `tailscale_up.sh`, baked into the template and run as the E2B backend's
+**`post_create_cmd`** — fired once per sandbox after creation, as root, in the background, inheriting
+the sandbox's `env_vars`. That hook is the *only* place it can be consumed: a template **start
+command** runs while the template BUILDS and is snapshotted into every sandbox, so it starts before
+any sandbox (and any per-sandbox env var) exists. remote-box translates a Dockerfile
+`CMD`/`ENTRYPOINT` into exactly that start command, which is why the E2B Dockerfile has neither.
 
 The harness resolves the name inside `sandbox_activate`, once per workflow run, on the turn that
 creates the sandbox — so the key is minted at sandbox-creation time, off the workflow thread, and
@@ -83,18 +109,49 @@ required before this works at all (`tagOwners` for the tag, plus an `acls` rule)
 `deploy/.env.example`. With `TAILSCALE_API_KEY` unset the provider returns the plain config and
 sandboxes join nothing, so the example still runs without Tailscale.
 
-Inside the sandbox, `supervise.sh` runs `tailscale up` before launching the agent's server. Two
-caveats worth knowing:
+Getting `tailscaled` to work inside an E2B sandbox took three fixes, each documented at length where
+it lives, because every one of them presents as "the auth key was rejected" when it is nothing of the
+kind:
 
-- **Userspace networking.** Daytona container sandboxes have no `/dev/net/tun`, so `tailscaled`
-  runs with `--tun=userspace-networking` and the tailnet is reachable only through the SOCKS5/HTTP
-  proxies it listens on (`localhost:1055`). Those are published to `/home/daytona/tailscale.env`
-  rather than exported globally, so the agent's ordinary internet traffic (pip, npm, git) isn't
-  silently pulled through the tailnet stack. To point one command at the tailnet:
-  `set -a; . /home/daytona/tailscale.env; set +a; curl http://host`. If the sandbox class ever does
-  get a TUN device, the script detects it and uses a real interface instead, with no proxy needed.
+1. **Link-local-only networking** (`tailscale_up.sh`, `ensure_routable_addr`). An E2B sandbox's `eth0`
+   has a single `169.254.0.x/30` address and a link-local default gateway. Tailscale's network monitor
+   ignores 169.254/16, concludes the network is down, logs `control: setPaused(true)` and parks the
+   auth routine *before contacting the control plane* — while `curl https://controlplane.tailscale.com`
+   returns 200 from the same shell. Adding a dummy interface with a routable `/32` fixes it. Userspace
+   networking does **not** dodge this.
+2. **The packaged systemd unit** (E2B Dockerfile). E2B runs systemd as PID 1 and the Debian package
+   enables `tailscaled.service`, whose `ExecStartPre` runs `tailscaled --cleanup` — which *deletes the
+   socket* our daemon just bound. The unit is masked so one daemon, ours, owns the socket.
+3. **Build-time daemons get snapshotted** (E2B Dockerfile). E2B snapshots the build VM with its
+   processes running, so a `tailscaled` started by the package's postinst reappears in every sandbox
+   holding the socket with a network that died with the build. `policy-rc.d` suppresses the start, and
+   the baked `tailscaled.state` is deleted so sandboxes don't all share one node identity.
+
+Further caveats:
+
+- **MagicDNS must be enabled on your tailnet** for tailnet *names* to resolve. Verified against this
+  tailnet: the control plane sent an empty DNS config (`dns: Set: {DefaultResolvers:[]
+  SearchDomains:[]}`), `MagicDNSSuffix` was empty and `/etc/resolv.conf` kept E2B's `8.8.8.8`, so only
+  `100.x` addresses work. Enable it under **Admin → DNS**.
+
+- **(Daytona backend) Egress to the control plane is blocked.** Observed July 2026: connections to
+  `controlplane.tailscale.com` are reset (`fetch control key: ... read: connection reset by peer`),
+  so `tailscaled` never reaches the coordination server and the auth key is never presented. The
+  node sits in `NeedsLogin` and `tailscale status` says `Logged out.` — which looks like a key or ACL
+  problem but is neither. Check `/home/daytona/server.log` first: the supervisor distinguishes this
+  case explicitly. Sandbox hosts often block VPN control planes as an abuse vector; Daytona's create
+  API has `domain_allow_list`/`network_allow_list`, but remote-box passes neither (it sends only
+  `snapshot` and `env_vars`), so allowing them per-sandbox from the provider isn't possible today.
+- **TUN vs userspace networking.** Both scripts detect `/dev/net/tun` and use a real interface when
+  it's there (transparent routing; MagicDNS too, if enabled on the tailnet) — E2B and Daytona's
+  container class both provide one. Without it, they fall back to `--tun=userspace-networking`, where the tailnet is reachable
+  only through the SOCKS5/HTTP proxies on `localhost:1055`. Those get published to
+  `/home/daytona/tailscale.env` rather than exported, so the agent's ordinary internet traffic (pip,
+  npm, git) isn't silently pulled through the tailnet stack; point one command at the tailnet with
+  `set -a; . /home/daytona/tailscale.env; set +a; curl http://host`.
 - **Restarts.** The key is single-use and the node is ephemeral, so a sandbox that is stopped and
-  started again (which the preview proxy does routinely) rejoins using the `tailscaled.state` it
+  started again (E2B pause is a SUSPEND, so the daemon simply survives it; Daytona's preview proxy
+  stops and starts routinely) rejoins using the `tailscaled.state` it
   persisted — but only while the tailnet still recognises that node. Once an ephemeral node has been
   offline long enough to be reaped, there is no second key to redeem and the sandbox comes back
   without the tailnet (logged, never fatal). If sandboxes need to survive long stops, mint a
@@ -132,14 +189,25 @@ web app) that lets you open a server the agent started inside the sandbox. Its `
 map of the modules; `preview/proxy.py` is the request path and `preview/allowlist.py` is the access
 model. It works like this:
 
-1. **The snapshot entrypoint (`supervise.sh`)** is a keepalive that watches
-   `/home/daytona/project/start.sh` (inside the project dir, so the agent's `write` tool can create
-   it) and (re)launches it on every boot — so a woken sandbox re-serves automatically.
+1. **The boot script (`boot.sh`, the template's `post_create_cmd`)** joins the tailnet, then hands
+   off to **`supervise.sh`**, a keepalive that watches `/home/user/project/start.sh` (inside the
+   project dir, so the agent's `write` tool can create it) and relaunches it if it dies.
 2. **The agent** writes the foreground, `0.0.0.0`-bound launch command to `start.sh`, then reads
-   `$DAYTONA_SANDBOX_ID` and hands you `https://<sandboxId>-<port>.<PREVIEW_BASE_DOMAIN>/`.
-3. **The proxy** routes by **subdomain**: it parses `<sandboxId>-<port>` from the Host header, wakes a
-   stopped sandbox on request, fetches a fresh preview token, waits for the server to bind, then
-   forwards HTTP + WebSocket/HMR traffic with the request path untouched.
+   `$E2B_SANDBOX_ID` and hands you `https://<sandboxId>-<port>.<PREVIEW_BASE_DOMAIN>/`.
+3. **The proxy** routes by **subdomain**: it parses `<sandboxId>-<port>` from the Host header, resumes
+   a paused sandbox on request, waits for the server to bind, then forwards HTTP + WebSocket/HMR
+   traffic with the request path untouched, adding the sandbox's traffic token upstream.
+
+E2B's `pause()` preserves **memory as well as disk**, so the agent's server is still running when a
+later request resumes it — there is no relaunch to wait for. (On Daytona, stopping killed every
+process, which is the only reason `supervise.sh` had to re-run `start.sh` on each boot. It is kept
+here for restart-on-crash and because it gives the agent the `start.sh` contract its instructions are
+written against.)
+
+**Previews can't be shared past the sign-in.** The sandbox is created with
+`allow_public_traffic=False`, so its own `https://<port>-<id>.e2b.app` URL returns **403** to
+everyone; only the proxy holds the `e2b-traffic-access-token` (recovered via `connect()`). Daytona's
+equivalent token travelled inside preview links, so it could leak past the gate — this cannot.
 
 Routing by subdomain (not a `/s/<id>/<port>/` path prefix) is what lets a previewed site behave like
 a normal site — it's served at the root of its own subdomain, so absolute asset paths work. Deploying
@@ -148,11 +216,16 @@ it needs a wildcard DNS record + a reverse proxy for wildcard TLS; see
 
 ### Cost: idle sandboxes stop themselves
 
-Waking a sandbox on a preview hit would otherwise leave it billing compute forever (preview HTTP
-traffic doesn't count as activity). So the proxy sets a Daytona **auto-stop interval**
-(`PREVIEW_AUTO_STOP_MINUTES`, default `3`) on each sandbox it serves. SDK interactions — including the
-agent's own tool calls — count as activity, so an active session never stops mid-turn; an idle
-preview stops itself and re-wakes on the next request.
+Resuming a sandbox on a preview hit would otherwise leave it billing compute forever. E2B has no
+server-side idle stop to delegate this to, and its `timeout` is **not** an equivalent — when an E2B
+timeout elapses the sandbox is *killed* and cannot be resumed, which would destroy the chat session,
+not just the preview. So the proxy runs its own idle timer (`PREVIEW_AUTO_STOP_MINUTES`, default `3`)
+and calls `pause()`, which preserves everything; the next request resumes it. `PREVIEW_SANDBOX_TIMEOUT_SECONDS`
+(default ≥4× the idle window) is only a backstop against a leaked sandbox if the proxy dies before its
+timer fires.
+
+Pausing a sandbox the agent is mid-turn on is safe: remote-box resumes it on the next tool call. The
+cost is latency on that call, not a broken session.
 
 ### Caveats (this is a demo, not production)
 

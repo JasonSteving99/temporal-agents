@@ -2029,7 +2029,7 @@ wheels = [
 
 [[package]]
 name = "remote-box"
-version = "0.7.0"
+version = "0.10.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "daytona" },
@@ -2037,9 +2037,9 @@ dependencies = [
     { name = "pydantic" },
     { name = "python-dotenv" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e5/d6/b5ab189943a984d4a9245486034f38ee719575bfc3a3e2c09da170795392/remote_box-0.7.0.tar.gz", hash = "sha256:108ea00d65c92aaa9d926fb46c51379b9e130662850f514277f26afab12814a3", size = 145583, upload-time = "2026-07-29T12:42:52.021Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/20/1a/34d394670f76c2cc4a056f824fa594bc87ff0105b282ff22238a4e8026e7/remote_box-0.10.0.tar.gz", hash = "sha256:ea43be9c63b930d55f154f1ff1a0751ee5b26994ca1cd65c4121098ae1f4f4bd", size = 149380, upload-time = "2026-07-30T00:21:54.182Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f6/77/d4f044eda59904be07977a33dd2854f28c2ee65979fb046be2dc12149b62/remote_box-0.7.0-py3-none-any.whl", hash = "sha256:692e2f6d4d06d9229af23e42ac3caf9783f7d7cdfb3b00d101f30108b3750350", size = 38014, upload-time = "2026-07-29T12:42:50.862Z" },
+    { url = "https://files.pythonhosted.org/packages/6c/1d/074023309d5b39e632d026857054e3d5bc2a351b5c16db83ab1a0eb44e40/remote_box-0.10.0-py3-none-any.whl", hash = "sha256:20084d4dfae155b6eee65055ef35c2adbe2615499ab595c62a2bf8b28712ffc4", size = 41043, upload-time = "2026-07-30T00:21:52.758Z" },
 ]
 
 [[package]]
@@ -2250,6 +2250,7 @@ dependencies = [
     { name = "aiohttp" },
     { name = "google-genai" },
     { name = "playwright" },
+    { name = "remote-box" },
     { name = "temporal-agent-harness", extra = ["genai", "sandbox", "ui"] },
 ]
 
@@ -2258,6 +2259,7 @@ requires-dist = [
     { name = "aiohttp", specifier = ">=3.9" },
     { name = "google-genai", specifier = "==2.8.0" },
     { name = "playwright", specifier = ">=1.49" },
+    { name = "remote-box", specifier = ">=0.10.0" },
     { name = "temporal-agent-harness", extras = ["sandbox", "ui", "genai"], git = "https://github.com/temporal-community/temporal-agent-harness.git?rev=sandbox-tools" },
 ]
 

@@ -1,12 +1,12 @@
 name: build-image
 
-# Build the coding-agent runtime image, push it to GHCR, then build the Daytona snapshot the agent's
-# tools run in — so both are ready before the deployed worker polls. The snapshot is built FROM the
+# Build the coding-agent runtime image, push it to GHCR, then build the E2B template the agent's
+# tools run in — so both are ready before the deployed worker polls. The template is built FROM the
 # just-pushed image (same commit, same examples/ bytes), so its content hash matches exactly what the
 # deployed worker computes and looks up at runtime (SandboxConfig.require_prebuilt=True — the worker
-# never builds the snapshot itself).
+# never builds the template itself).
 #
-# Required repo secret: DAYTONA_API_KEY (Settings -> Secrets and variables -> Actions).
+# Required repo secret: E2B_API_KEY (Settings -> Secrets and variables -> Actions).
 # One-time: after the first run, set the GHCR package visibility to Public so `docker compose pull`
 # on the host needs no login.
 
@@ -71,20 +71,20 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # Build (or verify) the Daytona snapshot the tools run in, using the image we just pushed (pinned by
-  # immutable digest). This uploads examples/ to Daytona and triggers the remote build; it needs only
-  # DAYTONA_API_KEY. Fails the pipeline if the snapshot isn't ready, so a deploy can't race an unbuilt
+  # Build (or verify) the E2B template the tools run in, using the image we just pushed (pinned by
+  # immutable digest). This uploads examples/ to E2B and triggers the remote build; it needs only
+  # E2B_API_KEY. Fails the pipeline if the template isn't ready, so a deploy can't race an unbuilt
   # image (which would surface as SandboxImageNotBuilt on the first tool call).
-  build-snapshot:
+  build-template:
     needs: build-and-push
     runs-on: ubuntu-latest
     steps:
-      - name: Require DAYTONA_API_KEY
+      - name: Require E2B_API_KEY
         env:
-          DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
+          E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
         run: |
-          if [ -z "$DAYTONA_API_KEY" ]; then
-            echo "::error::DAYTONA_API_KEY secret is not set — add it under Settings > Secrets and variables > Actions."
+          if [ -z "$E2B_API_KEY" ]; then
+            echo "::error::E2B_API_KEY secret is not set — add it under Settings > Secrets and variables > Actions."
             exit 1
           fi
 
@@ -95,18 +95,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build the Daytona snapshot
+      - name: Build the E2B template
         env:
           IMAGE: ${{ needs.build-and-push.outputs.image }}@${{ needs.build-and-push.outputs.digest }}
-          DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
+          E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
         run: |
           # SANDBOX.backend names a provider (it mints a per-sandbox Tailscale key), which cannot run
           # offline — no worker here — so the build takes the concrete config explicitly. It's the
           # same object the provider copies at runtime, so build-time and run-time can't disagree.
-          docker run --rm -e DAYTONA_API_KEY "$IMAGE" python -c "
+          docker run --rm -e E2B_API_KEY "$IMAGE" python -c "
           from temporal_agent_harness.harness.sandbox import build_sandbox
           from examples.sandbox_tools.coding_agent.tools import SANDBOX, SANDBOX_BACKEND
           r = build_sandbox(SANDBOX, backend=SANDBOX_BACKEND)
-          print('snapshot:', r.status, '-', r.detail)
-          assert r.status in ('built', 'ready'), f'snapshot build failed: {r.status} {r.detail}'
+          print('template:', r.status, '-', r.detail)
+          assert r.status in ('built', 'ready'), f'template build failed: {r.status} {r.detail}'
           "

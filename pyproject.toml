@@ -11,13 +11,26 @@ requires-python = ">=3.12"  # the harness `sandbox` extra (remote-box) requires 
 dependencies = [
     # The harness + the three extras this example needs. Tracked as a BRANCH here because uv.lock
     # pins the exact commit for this image (`uv lock --upgrade-package temporal-agent-harness` moves
-    # it). The Daytona snapshot has no lock and pins the SHA inline instead, so after every bump copy
+    # it). The sandbox image has no lock and pins the SHA inline instead, so after every bump copy
     # the lock's resolved SHA into examples/sandbox_tools/coding_agent/pyproject.toml or the two
     # images drift apart — see "Updating the harness" in examples/Dockerfile.sandbox-coding-agent.
-    #   sandbox -> remote-box (+ the Daytona SDK)   the tools run in a Daytona cloud sandbox
+    #   sandbox -> remote-box (+ the E2B/Daytona SDKs)  the tools run in an E2B cloud sandbox
     #   ui      -> fastapi[standard] (+ uvicorn)     the packaged web app + browser UI (dist ships in the wheel)
     #   genai   -> google-genai (+ google-auth)      the agent drives the Gemini Interactions API
     "temporal-agent-harness[sandbox,ui,genai] @ git+https://github.com/temporal-community/temporal-agent-harness.git@sandbox-tools",
+    # remote-box, pinned AHEAD of the harness's own constraint (which would resolve 0.7.0 from
+    # PyPI). 0.9.0 adds what the E2B backend needs to carry a per-sandbox credential:
+    # `E2B.env_vars` (0.7.0 had none — only Daytona did) and `post_create_cmd`, a root, backgrounded
+    # command fired once after creation that inherits those env vars. That hook is the ONLY place the
+    # Tailscale key can be consumed on E2B: `start_cmd` (and any Dockerfile CMD/ENTRYPOINT, which is
+    # translated into one) runs while the TEMPLATE builds and is snapshotted into every sandbox, so it
+    # starts before the sandbox — and its env — exists.
+    # 0.10.0 adds `allow_public_traffic` on top of that, which is what makes previews SAFE: with it
+    # False the sandbox's own e2b.app URL returns 403 without a token only the preview proxy holds, so
+    # a preview cannot be shared past the proxy's sign-in. It can only be set at creation — E2B's
+    # update_network cannot change it — so it has to come through remote-box.
+    # Pinned above the harness's own constraint, which would otherwise resolve an older PyPI release.
+    "remote-box>=0.10.0",
     # Pin google-genai to the exact version the harness `sandbox-tools` branch was built against.
     # The Gemini plugin imports the private `google.genai._interactions` module, which was removed
     # (renamed to a public `interactions.py`) in later releases — 2.14.0 breaks import. 2.8.0 is what

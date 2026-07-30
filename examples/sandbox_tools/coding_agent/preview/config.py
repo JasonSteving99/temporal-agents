@@ -10,9 +10,8 @@ handler.
 import os
 import secrets
 
-# --- Daytona --------------------------------------------------------------
-DAYTONA_API_KEY = os.environ["DAYTONA_API_KEY"]          # required
-DAYTONA_TARGET = os.environ.get("DAYTONA_TARGET")        # e.g. "us"; None = org default
+# --- E2B ------------------------------------------------------------------
+E2B_API_KEY = os.environ["E2B_API_KEY"]                  # required
 
 # --- Where we serve ------------------------------------------------------
 # The base domain preview subdomains hang off of, e.g. "preview.example.com". A request to
@@ -22,12 +21,25 @@ PREVIEW_BASE_DOMAIN = os.environ.get("PREVIEW_BASE_DOMAIN", "").strip().lower()
 
 PROXY_PORT = int(os.environ.get("PREVIEW_PROXY_PORT", "8080"))
 
-# Idle cost cap. Without this, a woken sandbox keeps billing for compute until
-# something else stops it — and preview traffic alone never will. So the proxy
-# tells Daytona to auto-stop the sandbox after this many idle minutes. This is a
+# Idle cost cap. Without this, a resumed sandbox keeps billing for compute until
+# something else stops it — and preview traffic alone never will. This is a
 # PROXY-scoped concern on purpose: the harness that CREATES the sandbox is left
-# untouched. Set 0 to leave the sandbox's auto-stop as-is (don't manage it).
+# untouched. Set 0 to leave sandbox lifetime entirely alone.
+#
+# Unlike Daytona, E2B has no server-side idle auto-stop to delegate this to, and its
+# `timeout` is NOT an equivalent: when an E2B timeout elapses the sandbox is KILLED and
+# cannot be resumed, which would destroy the chat session, not just the preview. So the
+# proxy runs its own idle timer and calls pause() — which preserves filesystem AND
+# memory, so the agent's server is still running when a later request resumes it.
 AUTO_STOP_MINUTES = int(os.environ.get("PREVIEW_AUTO_STOP_MINUTES", "3"))
+
+# Lifetime handed to connect() when the proxy resumes a sandbox. It exists only as a
+# backstop against a leaked sandbox if the proxy dies before its idle timer fires, so it
+# must comfortably EXCEED the idle window — otherwise E2B's kill-on-timeout would win the
+# race against our pause and take the session with it.
+SANDBOX_TIMEOUT_SECONDS = int(
+    os.environ.get("PREVIEW_SANDBOX_TIMEOUT_SECONDS", str(max(AUTO_STOP_MINUTES * 60 * 4, 1800)))
+)
 
 # --- Firebase auth gate ---------------------------------------------------
 # The gate is OFF when FIREBASE_API_KEY is unset, so the example still runs

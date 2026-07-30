@@ -13,7 +13,7 @@ builds the sandbox image implicitly (SandboxConfig.require_prebuilt).
 Env vars (set in .env.local — see .env.example):
     TEMPORAL_CONFIG_FILE / TEMPORAL_PROFILE   Temporal connection profile
     GEMINI_API_KEY                            required — the agent calls the Gemini API
-    DAYTONA_API_KEY                           required — the tools run on Daytona
+    E2B_API_KEY                               required — the tools run on an E2B sandbox
     SANDBOXED_CODING_AGENT_TASK_QUEUE         task queue to poll (default: sandboxed-coding-agent)
     TAILSCALE_API_KEY                         optional — mints each sandbox's tailnet auth key;
                                               unset means sandboxes join no tailnet (see tailscale.py)
@@ -34,7 +34,7 @@ from temporal_agent_harness.ai_sdks.google_genai_plugin import GoogleGenAIPlugin
 from temporal_agent_harness.harness import agent
 from temporal_agent_harness.harness.sandbox.activities import sandbox_activities
 
-from .tailscale import PROVIDER_NAME, daytona_with_tailscale
+from .tailscale import PROVIDER_NAME, e2b_with_tailscale
 from .tools import SANDBOXED_CODING_TOOLS
 from .workflow import TASK_QUEUE, SandboxedCodingAgentWorkflow
 
@@ -72,7 +72,7 @@ async def main() -> None:
         # One tool_activity per sandboxed tool: each tool's durable body. The Gemini interactions
         # activity is registered by the plugin.
         activities=[
-            *sandbox_activities({PROVIDER_NAME: daytona_with_tailscale}),
+            *sandbox_activities({PROVIDER_NAME: e2b_with_tailscale}),
             *(agent.tool_activity(tool) for tool in SANDBOXED_CODING_TOOLS),
         ],
     )

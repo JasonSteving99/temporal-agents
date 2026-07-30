@@ -12,7 +12,7 @@ awake and the capture is therefore free:
   * when someone presses Refresh — which DOES wake a stopped sandbox, so the
     landing page says so on the button.
 
-Capture goes straight to Daytona's preview URL with the preview token, not
+Capture goes straight to the sandbox's e2b.app URL with its traffic token, not
 through our own proxy, so it never trips the auth gate and never re-enters the
 handler that spawned it.
 
@@ -99,12 +99,12 @@ class Screenshotter:
             browser = await self._browser_or_none()
             if browser is None:
                 return False
+            from .proxy import preview_headers  # local: proxy imports this module
             context = await browser.new_context(
                 viewport={"width": SHOT_WIDTH, "height": SHOT_HEIGHT},
-                extra_http_headers={
-                    "x-daytona-preview-token": token,
-                    "x-daytona-skip-preview-warning": "true",
-                },
+                # The sandbox's traffic token (empty when the sandbox allows public
+                # traffic); see proxy.preview_headers.
+                extra_http_headers=preview_headers(token),
             )
             try:
                 page = await context.new_page()

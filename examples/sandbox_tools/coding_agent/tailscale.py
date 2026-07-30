@@ -1,7 +1,7 @@
 # ABOUTME: The SandboxConfig BACKEND PROVIDER for this example — an async callable that mints a
-# fresh, single-use, ephemeral, tagged Tailscale auth key from the Tailscale API and hands back a
-# Daytona config carrying it as TAILSCALE_AUTHKEY. Registered on the worker by name
-# (`sandbox_activities({PROVIDER_NAME: daytona_with_tailscale})`, see worker.py); named by the agent
+# fresh, single-use, ephemeral, tagged Tailscale auth key from the Tailscale API and hands back an
+# E2B config carrying it as TAILSCALE_AUTHKEY. Registered on the worker by name
+# (`sandbox_activities({PROVIDER_NAME: e2b_with_tailscale})`, see worker.py); named by the agent
 # as its `SandboxConfig.backend` (see tools.py).
 #
 # Why a provider rather than a literal config: an auth key is minted per sandbox by an HTTP call, so
@@ -11,7 +11,7 @@
 #
 # WORKER-SIDE ONLY. Deliberately NOT imported by tools.py: remote-box re-imports tools.py inside the
 # sandbox on every tool call, and the sandbox has no business importing the module that holds the
-# tailnet credential path. tools.py owns the snapshot's identity (SANDBOX_BACKEND); this module only
+# tailnet credential path. tools.py owns the template's identity (SANDBOX_BACKEND); this module only
 # copies it and adds env_vars.
 #
 # The key is single-use + ephemeral by design, so a leaked key is worth almost nothing: it can join
@@ -33,7 +33,7 @@ import os
 import re
 
 import aiohttp
-from remote import Daytona
+from remote import E2B
 
 from .tools import SANDBOX, SANDBOX_BACKEND
 
@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 # The name the worker registers this provider under and the agent names as its backend. The two
 # halves are wired by name because a live async callable can be neither constructed in workflow code
 # nor serialized into an activity input.
-PROVIDER_NAME = "daytona-tailscale"
+PROVIDER_NAME = "e2b-tailscale"
 
 # tools.py names the provider with a LITERAL (it must not import this module — see the header), so
 # nothing but this check keeps the two spellings together. A mismatch would otherwise surface only at
@@ -51,7 +51,9 @@ assert SANDBOX.backend == PROVIDER_NAME, (
     f"tools.SANDBOX.backend ({SANDBOX.backend!r}) must equal PROVIDER_NAME ({PROVIDER_NAME!r})"
 )
 
-# The env var the snapshot's supervise.sh reads on first boot to run `tailscale up --authkey=...`.
+# The env var the template's tailscale_up.sh reads to run `tailscale up --authkey=...`. It reaches the
+# sandbox through E2B's create-time `envs`, and is seen by post_create_cmd (fired after creation) —
+# NOT by a template start command, which runs at template BUILD time and cannot see it.
 AUTHKEY_ENV_VAR = "TAILSCALE_AUTHKEY"
 
 _KEYS_URL = "https://api.tailscale.com/api/v2/tailnet/{tailnet}/keys"
@@ -139,17 +141,17 @@ async def mint_ephemeral_authkey(session: aiohttp.ClientSession) -> str:
     return key
 
 
-async def daytona_with_tailscale() -> Daytona:
-    """The provider itself: the run's Daytona config, with a freshly minted key in its env.
+async def e2b_with_tailscale() -> E2B:
+    """The provider itself: the run's E2B config, with a freshly minted key in its env.
 
     Copied from :data:`~examples.sandbox_tools.coding_agent.tools.SANDBOX_BACKEND` rather than
-    rebuilt, so the fields the snapshot's IDENTITY is derived from (`snapshot_name`,
-    `dockerfile_path`, `sandbox_class`) cannot drift from what was built ahead of time — drift there
+    rebuilt, so the fields the template's IDENTITY is derived from (`template_prefix`,
+    `dockerfile_path`, `start_cmd`) cannot drift from what was built ahead of time — drift there
     would fail activation's `require_prebuilt` check. `env_vars` are applied to the sandbox at
-    creation, not baked into the snapshot, which is what lets a per-run secret ride along at all.
+    creation, not baked into the template, which is what lets a per-run secret ride along at all.
 
     Tailscale is OPTIONAL: with no TAILSCALE_API_KEY set, this returns the plain config and the
-    sandbox simply never joins a tailnet (supervise.sh no-ops on the missing env var). That keeps
+    sandbox simply never joins a tailnet (tailscale_up.sh no-ops on the missing env var). That keeps
     this example runnable for anyone who doesn't use Tailscale.
 
     Safe to run more than once per sandbox, as the provider contract requires: `sandbox_activate` is

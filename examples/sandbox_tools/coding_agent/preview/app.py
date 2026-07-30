@@ -19,7 +19,7 @@ async def on_cleanup(app: web.Application) -> None:
     await screenshots.screenshotter.close()
     registry.flush(force=True)    # last_seen is only debounced-flushed while running
     await app["session"].close()
-    await proxy.daytona.close()   # closes the SDK's shared state-streaming websocket
+    proxy.cancel_idle_timers()    # don't leave pause tasks pending at shutdown
 
 
 def build_app() -> web.Application:
