@@ -35,6 +35,8 @@ with workflow.unsafe.imports_passed_through():
     from examples.coding_agent_common.todo_tools import todoread, todowrite
 
     from .tools import (
+        AI_GATEWAY_MODELS,
+        AI_GATEWAY_URL,
         PREVIEW_BASE_DOMAIN,
         PROJECT_ROOT,
         SANDBOX,
@@ -107,15 +109,45 @@ so every load shows the latest deploy, cache-first ONLY for immutable/versioned 
 `appinstalled` or when already `(display-mode: standalone)`. iOS fires no such event — there, show \
 a one-line "Share -> Add to Home Screen" hint instead."""
 
+# Only offered when AI_GATEWAY_URL is configured. The gateway is reachable from inside the sandbox
+# only (it lives on the tailnet the sandbox joins), which is why the instruction is emphatic about
+# calling it SERVER-side: a previewed site's client-side fetch runs in the user's browser, which is
+# not on the tailnet, so it would fail for everyone but the sandbox itself.
+_AI_INSTRUCTION = f"""
+
+## Building AI features
+
+This sandbox can reach a **pre-authenticated Gemini gateway** at {AI_GATEWAY_URL} — no API key \
+exists or is needed; access is granted by the sandbox itself. Use it whenever the user asks for AI \
+features. Models available, best first: {AI_GATEWAY_MODELS}.
+
+Use the `google-genai` library (`pip install google-genai`) pointed at the gateway:
+```python
+from google import genai
+client = genai.Client(api_key="unused", http_options={{"base_url": "{AI_GATEWAY_URL}"}})
+resp = client.models.generate_content(model="{AI_GATEWAY_MODELS.split(",")[0].strip()}", contents="...")
+print(resp.text)
+```
+`api_key` is a placeholder the library insists on and the gateway ignores — never ask the user for a \
+key, and never put one in the code.
+
+Call it from your **server-side code only** (the process `start.sh` starts). The gateway is reachable \
+from inside this sandbox, NOT from the user's browser, so a client-side `fetch()` to it from a \
+previewed page will fail for the user. Add an endpoint on your own server (e.g. `POST /api/ask`) that \
+calls the gateway and returns the result to the page."""
+
 _CLOSING_INSTRUCTION = """
 
 Keep going across tool calls until the task is done, then reply in brief, friendly prose: what you \
 built or changed, which files, and (if relevant) the preview URL. Never invent file contents or \
 command output you didn't actually read."""
 
-SYSTEM_INSTRUCTION = _BASE_INSTRUCTION + (
-    _PREVIEW_INSTRUCTION if PREVIEW_BASE_DOMAIN else ""
-) + _CLOSING_INSTRUCTION
+SYSTEM_INSTRUCTION = (
+    _BASE_INSTRUCTION
+    + (_PREVIEW_INSTRUCTION if PREVIEW_BASE_DOMAIN else "")
+    + (_AI_INSTRUCTION if AI_GATEWAY_URL else "")
+    + _CLOSING_INSTRUCTION
+)
 
 
 @workflow.defn(name="SandboxedCodingAgent")

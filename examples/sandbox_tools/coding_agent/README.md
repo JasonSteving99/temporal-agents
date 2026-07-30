@@ -158,6 +158,30 @@ Further caveats:
   reusable key instead — flip `"reusable"` in `tailscale.py` and accept that a key read out of a
   sandbox can then join more nodes.
 
+### Building AI features with no API key
+
+Set `AI_GATEWAY_URL` (e.g. `http://llm`, a Tailscale Aperture node on your tailnet) and the agent is
+told it can build AI features against it. Authorization is the sandbox's **tailnet identity**, so no
+key exists or is needed — `google-genai` is pointed at the gateway with a placeholder `api_key` the
+library insists on and the gateway ignores:
+
+```python
+from google import genai
+client = genai.Client(api_key="unused", http_options={"base_url": "http://llm"})
+client.models.generate_content(model="gemini-3.6-flash", contents="...")
+```
+
+Two things the instruction is emphatic about, because both are easy to get wrong:
+
+- **Server-side only.** The gateway lives on the tailnet, which the *sandbox* joined — the user's
+  browser did not. A client-side `fetch()` from a previewed page fails for everyone but the sandbox,
+  so the app must expose its own endpoint that calls the gateway.
+- **Never ask the user for a key.** There isn't one, and a model asked to "add AI" will otherwise
+  reach for `GEMINI_API_KEY` out of habit.
+
+Leave `AI_GATEWAY_URL` blank and the agent is never told the gateway exists. `AI_GATEWAY_MODELS`
+(default `gemini-3.6-flash, gemini-3.5-flash-lite`) is the list it picks from, best first.
+
 ## Approvals
 
 The tools run in a disposable box, so the blast radius is contained — but the mutating tools

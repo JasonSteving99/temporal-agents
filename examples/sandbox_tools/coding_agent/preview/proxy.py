@@ -7,6 +7,7 @@ worth issuing a certificate for.
 """
 
 import asyncio
+import logging
 
 from aiohttp import ClientSession, WSMsgType, web
 from e2b import AsyncSandbox
@@ -26,6 +27,8 @@ from .pages import DENIED_PAGE
 from .registry import app_key, registry
 from .screenshots import schedule_capture
 from .session import can_use_agent, is_authed, redirect_to_login
+
+logger = logging.getLogger(__name__)
 
 # Headers that must not be blindly copied through a proxy.
 HOP_BY_HOP = {
@@ -128,7 +131,10 @@ async def wait_for_server(
         except Exception:
             pass  # connection refused / not up yet — keep waiting
         await asyncio.sleep(0.5)
-    raise RuntimeError("server did not become ready in time")
+    raise RuntimeError(
+        f"no server answered {url} within {timeout:.0f}s — is the agent's start.sh serving this port, "
+        "bound to 0.0.0.0?"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -151,10 +157,10 @@ async def _pause_when_idle(sandbox_id: str) -> None:
         await AsyncSandbox.pause(sandbox_id=sandbox_id, api_key=E2B_API_KEY)
     except asyncio.CancelledError:
         raise
-    except Exception:
+    except Exception as e:
         # Already paused, killed, or gone — nothing to salvage, and this must never take
         # down the request path that scheduled it.
-        pass
+        logger.info("idle pause of %s did not apply — %s: %s", sandbox_id, type(e).__name__, e)
     finally:
         _idle_pausers.pop(sandbox_id, None)
 
@@ -289,7 +295,9 @@ async def proxy_agent(request: web.Request, session: ClientSession) -> web.Strea
 async def proxy_ws(request, sandbox_id, port, path, session):
     try:
         preview, _woken = await ensure_ready(sandbox_id, port, session)
-    except Exception:
+    except Exception as e:
+        logger.warning("preview websocket unavailable for %s:%s — %s: %s",
+                       sandbox_id, port, type(e).__name__, e)
         return web.Response(status=503, text="Warming up…")
 
     client_ws = web.WebSocketResponse()
@@ -361,6 +369,11 @@ async def handler(request: web.Request):
     try:
         preview, woken = await ensure_ready(sandbox_id, port, session)
     except Exception as e:
+        # Log it: the page below is the only other place this appears, and reading it requires being
+        # signed in and looking at the right tab at the right moment. A preview that "just doesn't
+        # load" is otherwise indistinguishable from DNS, TLS or auth trouble, none of which are here.
+        logger.warning("preview unavailable for %s:%s — %s: %s",
+                       sandbox_id, port, type(e).__name__, e)
         # Serve a branded "warming up" page instead of a raw 502.
         return web.Response(
             status=503, content_type="text/html",

@@ -45,6 +45,20 @@ PROJECT_ROOT = Path("/home/user/project")
 # unroutable preview URLs — the id came back empty).
 SANDBOX_ID_ENV_VAR = "E2B_SANDBOX_ID"
 
+# A pre-authenticated AI gateway reachable from inside the sandbox — in this deployment a Tailscale
+# Aperture node on the tailnet the sandbox joins (see tailscale.py), so calls are authorized by the
+# sandbox's tailnet identity and carry NO credential. Empty disables the whole feature: the agent's
+# system instruction then never mentions it, which is right for anyone without such a gateway.
+# Read here rather than hardcoded in workflow.py's prompt, so the URL and models can't drift out of
+# sync with the deployment the way the Daytona-era paths did.
+AI_GATEWAY_URL = os.environ.get("AI_GATEWAY_URL", "").strip().rstrip("/")
+
+# Models the gateway serves, best-first. The agent picks per task: the first for real work, the last
+# when it wants cheap and fast.
+AI_GATEWAY_MODELS = os.environ.get(
+    "AI_GATEWAY_MODELS", "gemini-3.6-flash, gemini-3.5-flash-lite"
+).strip()
+
 # The template's IDENTITY: the fields the image is built from. Everything that must agree between
 # build time and run time lives here, in one object, so the two can't drift — the offline build
 # (`build_sandbox(SANDBOX, backend=SANDBOX_BACKEND)`) and the runtime provider (tailscale.py, which
