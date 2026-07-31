@@ -16,6 +16,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 from remote import E2B
+from temporalio.common import RetryPolicy
 from temporalio.workflow import ActivityConfig
 
 from temporal_agent_harness.harness import agent
@@ -118,8 +119,32 @@ SANDBOX = SandboxConfig(
     local_project_root=Path(__file__).parent.parent.parent,  # -> examples/
 )
 
-# A generous timeout for the shell tool — installs/builds/tests can run long.
-_BASH_ACTIVITY = ActivityConfig(start_to_close_timeout=timedelta(minutes=3))
+# Every tool activity gives up after 3 attempts instead of retrying forever (the Temporal default).
+#
+# A sandboxed tool call is only as available as the sandbox behind it, and the sandbox's failure modes
+# are mostly NOT transient: it was killed by its TTL, paused out from under the run, or the E2B API is
+# refusing us. Retrying those forever turns a broken box into a turn that never ends and never says
+# why — the agent just stops, mid-thought, with the UI waiting. Three attempts still absorb the honest
+# blips (a dropped connection, a slow envd), and anything past that surfaces as a tool error the model
+# sees and can tell the user about.
+_RETRIES = RetryPolicy(maximum_attempts=3)
+
+# A generous timeout for the shell tool — installs/builds/tests can run long. Must stay comfortably
+# BELOW the preview proxy's idle-pause window (PREVIEW_AUTO_STOP_MINUTES), or a single long command
+# can outlast it: the proxy's idle timer is driven by the sandbox's TTL refresh, which happens once per
+# tool call, so a command that runs longer than the whole window looks exactly like an idle sandbox.
+_BASH_ACTIVITY = ActivityConfig(
+    start_to_close_timeout=timedelta(minutes=3),
+    retry_policy=_RETRIES,
+)
+
+# The other five tools are pure filesystem work inside the box — fast, so the harness's own 30s default
+# is right; it's restated here only because supplying an ActivityConfig replaces that default wholesale
+# (a config with a retry policy and no timeout is rejected by Temporal).
+_FAST_ACTIVITY = ActivityConfig(
+    start_to_close_timeout=timedelta(seconds=30),
+    retry_policy=_RETRIES,
+)
 
 
 class BashInput(BaseModel):
@@ -189,7 +214,7 @@ async def bash(arg: BashInput) -> BashResult:
     return BashResult(output=output, exit_code=exit_code)
 
 
-@agent.activity_tool_defn(sandboxed=True, inherently_safe=True)
+@agent.activity_tool_defn(sandboxed=True, inherently_safe=True, activity_config=_FAST_ACTIVITY)
 async def read(arg: ReadInput) -> ReadResult:
     """Read a UTF-8 text file from the project and return its full contents. `file_path` is relative
     to the project root, e.g. "src/main.py". Always read a file before editing it, so your `edit`
@@ -197,7 +222,7 @@ async def read(arg: ReadInput) -> ReadResult:
     return ReadResult(content=tool_impls.read_file(PROJECT_ROOT, arg.file_path))
 
 
-@agent.activity_tool_defn(sandboxed=True)
+@agent.activity_tool_defn(sandboxed=True, activity_config=_FAST_ACTIVITY)
 async def write(arg: WriteInput) -> WriteResult:
     """Create a new file, or OVERWRITE an existing one, with `content` (UTF-8), creating parent
     directories as needed. Replaces the WHOLE file — use `edit` for a surgical change to a large
@@ -205,7 +230,7 @@ async def write(arg: WriteInput) -> WriteResult:
     return WriteResult(message=tool_impls.write_file(PROJECT_ROOT, arg.file_path, arg.content))
 
 
-@agent.activity_tool_defn(sandboxed=True)
+@agent.activity_tool_defn(sandboxed=True, activity_config=_FAST_ACTIVITY)
 async def edit(arg: EditInput) -> EditResult:
     """Replace an exact substring in a file. `old_string` must occur EXACTLY ONCE (include enough
     surrounding context to make it unique) and is replaced with `new_string`. `read` the file first
@@ -215,7 +240,7 @@ async def edit(arg: EditInput) -> EditResult:
     return EditResult(message=message, diff=diff)
 
 
-@agent.activity_tool_defn(sandboxed=True, inherently_safe=True)
+@agent.activity_tool_defn(sandboxed=True, inherently_safe=True, activity_config=_FAST_ACTIVITY)
 async def grep(arg: GrepInput) -> GrepResult:
     """Search every text file in the project for a Python regular expression, returning matching
     lines as "path:lineno: line". Use it to locate a symbol, string, or definition before reading or
@@ -224,7 +249,7 @@ async def grep(arg: GrepInput) -> GrepResult:
     return GrepResult(matches=matches, count=count)
 
 
-@agent.activity_tool_defn(sandboxed=True, inherently_safe=True)
+@agent.activity_tool_defn(sandboxed=True, inherently_safe=True, activity_config=_FAST_ACTIVITY)
 async def glob(arg: GlobInput) -> GlobResult:
     """List project files whose path matches a glob `pattern` (e.g. "**/*.py", "src/**/*.ts"), one
     per line, relative to the project root. Use it to discover files by name/extension before reading

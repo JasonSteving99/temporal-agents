@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 #
-# /usr/local/bin/tailscale-up.sh — join the tailnet, once per E2B sandbox.
+# /usr/local/bin/tailscale-up.sh — get this E2B sandbox onto the tailnet, and KEEP it there.
+#
+# Run twice over: once at boot, then repeatedly by boot.sh's watchdog for the life of the sandbox.
+# The repeat is not belt-and-braces — the sandbox is paused between chat turns, and Tailscale removes
+# an ephemeral node that has been silent long enough, so a session resumed after a long idle comes
+# back holding a node key for a machine the control plane has forgotten. Every pass therefore has to
+# be cheap when there is nothing to do (it returns at the first check while the node is genuinely on
+# the tailnet) and has to be able to re-authenticate from scratch when there is (which is why the key
+# it redeems is minted reusable — see tailscale.py). "Genuinely" is load-bearing: see self_online.
 #
 # Run as this example's E2B `post_create_cmd` (see tools.py's SANDBOX_BACKEND): fired once
 # immediately after sandbox creation, as root, in the background, inheriting the sandbox's env_vars —
@@ -8,16 +16,16 @@
 #
 # It CANNOT be the template's start command: that runs while the template builds and is snapshotted
 # into every sandbox, so it starts before any sandbox env exists. post_create_cmd is the only hook
-# that sees the credential. (The Daytona equivalent is supervise.sh, which also supervises the
-# agent's server for the live-preview proxy; E2B owns sandbox lifetime and previews are Daytona-only
-# for now, so this script is just the tailnet.)
+# that sees the credential. (boot.sh is what post_create_cmd actually points at; it runs this script
+# first, then the watchdog, then hands off to supervise.sh. This file stays purely "the tailnet" so
+# it is usable on its own.)
 #
 # Never fatal: every failure is logged and the script exits 0. Losing the tailnet must not cost the
 # sandbox — remote-box backgrounds this and logs a launch failure as a warning, and the agent's tools
 # work regardless.
 #
-# Idempotent, as the hook contract requires: safe to run twice (a retried activity re-creates the
-# sandbox, and a second run finds the daemon already up and returns).
+# Idempotent, as the hook contract requires and the watchdog depends on: safe to run any number of
+# times (a second run finds the daemon already up and returns immediately).
 
 set -u -o pipefail
 
@@ -153,6 +161,33 @@ backend_state() {
     | sed 's/.*"\([^"]*\)"$/\1/'
 }
 
+# Whether the CONTROL PLANE still knows this node: "true", "false", or "" if it can't be read.
+#
+# The field that actually matters, and the one the obvious check misses. When Tailscale deletes this
+# node — which is what happens to an ephemeral node whose sandbox stayed paused too long — tailscaled
+# does NOT go back to NeedsLogin. It stays `BackendState: Running`, keeps serving its old `tailscale
+# status` output, complete with a 100.x address and every peer it last knew about, and only its log
+# betrays the truth: `PollNetMap: initial fetch failed 404: node not found`, forever. Measured: this
+# flips to false within ~20s of the node being deleted while BackendState never budges. So a watchdog
+# keyed on BackendState alone sees a perfectly healthy node and never lifts a finger, which is
+# precisely how a session could sit "on the tailnet" for hours while nothing on it answered.
+#
+# Parsed with python (like node_id) because "Online" appears on every peer too.
+self_online() {
+  local py=""
+  for c in /app/.venv/bin/python python3 python; do
+    command -v "$c" >/dev/null 2>&1 && { py=$c; break; }
+  done
+  [ -n "$py" ] || return 0
+  tailscale --socket="$TS_SOCK" status --json 2>/dev/null \
+    | "$py" -c 'import json,sys
+try:
+    v = json.load(sys.stdin).get("Self", {}).get("Online")
+except Exception:
+    v = None
+print("" if v is None else str(v).lower())' 2>/dev/null
+}
+
 main() {
   if ! command -v tailscaled >/dev/null 2>&1; then
     log "tailscaled not installed; nothing to do"
@@ -169,92 +204,40 @@ main() {
 
   mkdir -p "$(dirname "$TS_STATE")" "$(dirname "$TS_SOCK")" 2>/dev/null || true
 
-  # Already up from an earlier run of this script? Then there is nothing to do.
+  # Already up from an earlier run of this script? Then there is nothing to do. This is also the
+  # fast path of the watchdog boot.sh runs, which calls this script every TAILSCALE_WATCH_SECONDS
+  # for the life of the sandbox — so everything below has to be cheap to reach and safe to repeat.
+  #
+  # "Running" alone is not enough, though: see self_online. A node that has been deleted from the
+  # tailnet keeps reporting Running forever, so this also asks whether the control plane still
+  # agrees, and falls through to re-authentication when it doesn't.
   if [ "$(backend_state)" = "Running" ]; then
-    log "already up"
-    return 0
+    [ "$(self_online)" = "false" ] || return 0
+    # Being briefly offline is normal — a resumed sandbox reconnects a moment after it wakes, and
+    # re-registering during that window would abandon a perfectly good node and make a new one. Only
+    # a node that is STILL offline after the grace period is genuinely gone.
+    sleep "${TS_OFFLINE_GRACE:-20}"
+    [ "$(self_online)" = "false" ] || return 0
+    log "node reports Running but the control plane does not know it (deleted during a long pause?);" \
+        "re-authenticating"
   fi
-
-  # Any OTHER tailscaled must go before we start ours. A daemon can be inherited from the template
-  # snapshot (E2B snapshots the build VM with its processes running, so anything that started
-  # tailscaled during the build — notably the Debian package's postinst — reappears in every
-  # sandbox). Such a daemon is unusable: its network died with the build VM, it reports "the network
-  # is down" no matter what, and it holds the socket so ours exits with "address already in use".
-  # The Dockerfile suppresses that start, but a stale socket alone is enough to break the bind, so
-  # clear both here rather than trusting the image. Not reachable for a HEALTHY daemon — that case
-  # returned above.
-  if pkill -x tailscaled 2>/dev/null; then
-    log "killed a pre-existing tailscaled (inherited from the template snapshot?)"
-    sleep 1
-  fi
-  rm -f "$TS_SOCK" /run/tailscale/tailscaled.sock 2>/dev/null || true
-
-  ensure_routable_addr
 
   local userspace=""
-  if [ -c /dev/net/tun ]; then
-    log "/dev/net/tun present; starting with a real TUN interface"
-    tailscaled --state="$TS_STATE" --socket="$TS_SOCK" >>"$LOG" 2>&1 &
+  if [ -n "$(backend_state)" ]; then
+    # A daemon is answering; this node just isn't on the tailnet (logged out, or holding an identity
+    # the control plane has forgotten). Nothing to restart: leave the daemon alone and go straight to
+    # `up` below, which re-redeems the key. Restarting it here instead would throw away a perfectly
+    # good daemon on every pass of the watchdog.
+    log "daemon is answering (state $(backend_state)) but this node is not on the tailnet;" \
+        "re-authenticating"
+    [ -c /dev/net/tun ] || userspace=1
+    ensure_routable_addr
   else
-    # Fallback for a sandbox class without a TUN device: tailscaled joins the tailnet as a normal
-    # node, but with no kernel route, so traffic reaches the tailnet only through the proxies it
-    # listens on. Published to $TS_ENV_FILE rather than exported, so the agent's ordinary internet
-    # traffic (pip, npm, git) isn't silently pulled through the tailnet stack.
-    userspace=1
-    log "no /dev/net/tun; starting in userspace mode (proxies on $TS_PROXY_ADDR)"
-    tailscaled --state="$TS_STATE" --socket="$TS_SOCK" \
-      --tun=userspace-networking \
-      --socks5-server="$TS_PROXY_ADDR" \
-      --outbound-http-proxy-listen="$TS_PROXY_ADDR" >>"$LOG" 2>&1 &
+    ts_start_daemon || return 0
+    [ -c /dev/net/tun ] || userspace=1
   fi
 
-  # Wait until the daemon ANSWERS, not merely until its socket file exists (it appears before the
-  # daemon serves on it). `tailscale up` against a not-yet-listening socket fails immediately.
-  local ready=""
-  for _ in $(seq 1 30); do
-    if [ -n "$(backend_state)" ]; then ready=1; break; fi
-    sleep 0.5
-  done
-  [ -n "$ready" ] || log "daemon did not answer within 15s; trying anyway"
-
-  local up_args="--hostname=$TS_HOSTNAME"
-  # MagicDNS points /etc/resolv.conf at 100.100.100.100, which nothing can route without a TUN
-  # device — that would break ALL name resolution, not just tailnet names.
-  [ -n "$userspace" ] && up_args="$up_args --accept-dns=false"
-
-  # Which `up` to run comes from the DAEMON's state, never from whether the state file exists:
-  # tailscaled writes that file (its machine key) as soon as it starts, before any login. A bare
-  # `tailscale up` on a logged-out node starts an INTERACTIVE login, printing an auth URL and
-  # blocking for a browser that is never coming. --timeout bounds every path regardless.
-  local state
-  state=$(backend_state)
-  log "backend state is ${state:-unknown}"
-
-  # shellcheck disable=SC2086  # $up_args is a flag list; word splitting is the point
-  if [ "$state" = "Stopped" ]; then
-    if tailscale --socket="$TS_SOCK" up --timeout=30s $up_args >>"$LOG" 2>&1; then
-      log "up with saved node state"
-    else
-      log "saved node state would not come up; continuing without the tailnet"
-      return 0
-    fi
-  elif [ -n "${TAILSCALE_AUTHKEY:-}" ]; then
-    if tailscale --socket="$TS_SOCK" up --authkey="$TAILSCALE_AUTHKEY" --timeout=30s $up_args \
-      >>"$LOG" 2>&1; then
-      log "up with the auth key minted for this sandbox"
-    elif grep -q "fetch control key" "$LOG" 2>/dev/null; then
-      log "cannot reach controlplane.tailscale.com from this sandbox (egress blocked?);" \
-          "the auth key was never presented — continuing without the tailnet"
-      return 0
-    else
-      log "login failed; the key may be expired or already redeemed (it is single-use)" \
-          "— see $LOG. Continuing without the tailnet"
-      return 0
-    fi
-  else
-    log "no identity and no auth key; continuing without the tailnet"
-    return 0
-  fi
+  ts_login "$userspace" || return 0
 
   if [ -n "$userspace" ]; then
     {
@@ -273,6 +256,102 @@ main() {
   # Node ID -> sandbox is then an exact join: the Tailscale devices API maps this ID to the hostname
   # above, which is agent-<E2B_SANDBOX_ID>.
   log "tailnet ready as $TS_HOSTNAME (node id $(node_id))"
+}
+
+# Start our own tailscaled and wait for it to answer. Only called when nothing is answering.
+ts_start_daemon() {
+  # Any OTHER tailscaled must go before we start ours. A daemon can be inherited from the template
+  # snapshot (E2B snapshots the build VM with its processes running, so anything that started
+  # tailscaled during the build — notably the Debian package's postinst — reappears in every
+  # sandbox). Such a daemon is unusable: its network died with the build VM, it reports "the network
+  # is down" no matter what, and it holds the socket so ours exits with "address already in use".
+  # The Dockerfile suppresses that start, but a stale socket alone is enough to break the bind, so
+  # clear both here rather than trusting the image. Not reachable for a daemon that ANSWERS — those
+  # two cases returned above.
+  if pkill -x tailscaled 2>/dev/null; then
+    log "killed a pre-existing tailscaled (inherited from the template snapshot?)"
+    sleep 1
+  fi
+  rm -f "$TS_SOCK" /run/tailscale/tailscaled.sock 2>/dev/null || true
+
+  ensure_routable_addr
+
+  if [ -c /dev/net/tun ]; then
+    log "/dev/net/tun present; starting with a real TUN interface"
+    tailscaled --state="$TS_STATE" --socket="$TS_SOCK" >>"$LOG" 2>&1 &
+  else
+    # Fallback for a sandbox class without a TUN device: tailscaled joins the tailnet as a normal
+    # node, but with no kernel route, so traffic reaches the tailnet only through the proxies it
+    # listens on. Published to $TS_ENV_FILE rather than exported, so the agent's ordinary internet
+    # traffic (pip, npm, git) isn't silently pulled through the tailnet stack.
+    log "no /dev/net/tun; starting in userspace mode (proxies on $TS_PROXY_ADDR)"
+    tailscaled --state="$TS_STATE" --socket="$TS_SOCK" \
+      --tun=userspace-networking \
+      --socks5-server="$TS_PROXY_ADDR" \
+      --outbound-http-proxy-listen="$TS_PROXY_ADDR" >>"$LOG" 2>&1 &
+  fi
+
+  # Wait until the daemon ANSWERS, not merely until its socket file exists (it appears before the
+  # daemon serves on it). `tailscale up` against a not-yet-listening socket fails immediately.
+  local ready=""
+  for _ in $(seq 1 30); do
+    if [ -n "$(backend_state)" ]; then ready=1; break; fi
+    sleep 0.5
+  done
+  [ -n "$ready" ] || log "daemon did not answer within 15s; trying anyway"
+}
+
+# Log this node in, from whatever state the daemon is in. $1 non-empty means userspace mode.
+# Returns non-zero when the node did NOT come up, so callers can bail quietly.
+ts_login() {
+  local userspace="$1"
+  local up_args="--hostname=$TS_HOSTNAME"
+  # MagicDNS points /etc/resolv.conf at 100.100.100.100, which nothing can route without a TUN
+  # device — that would break ALL name resolution, not just tailnet names.
+  [ -n "$userspace" ] && up_args="$up_args --accept-dns=false"
+
+  # Which `up` to run comes from the DAEMON's state, never from whether the state file exists:
+  # tailscaled writes that file (its machine key) as soon as it starts, before any login. A bare
+  # `tailscale up` on a logged-out node starts an INTERACTIVE login, printing an auth URL and
+  # blocking for a browser that is never coming. --timeout bounds every path regardless.
+  local state
+  state=$(backend_state)
+  log "backend state is ${state:-unknown}"
+
+  # shellcheck disable=SC2086  # $up_args is a flag list; word splitting is the point
+  if [ "$state" = "Stopped" ]; then
+    if tailscale --socket="$TS_SOCK" up --timeout=30s $up_args >>"$LOG" 2>&1; then
+      log "up with saved node state"
+      return 0
+    fi
+    log "saved node state would not come up; falling back to the auth key"
+  fi
+
+  if [ -n "${TAILSCALE_AUTHKEY:-}" ]; then
+    # --force-reauth, because the interesting case is a node whose IDENTITY is gone: Tailscale
+    # removed this sandbox's ephemeral node while it was paused, so tailscaled still holds a node
+    # key the control plane no longer knows. A plain `up --authkey` can decide it is already
+    # configured and do nothing at all with the key; forcing reauth makes it actually redeem it and
+    # register again. Harmless on a first boot, where there is no identity to replace.
+    if tailscale --socket="$TS_SOCK" up --authkey="$TAILSCALE_AUTHKEY" --force-reauth \
+      --timeout=30s $up_args >>"$LOG" 2>&1; then
+      log "up with the auth key minted for this sandbox"
+      return 0
+    fi
+    # Only the TAIL of the log: it accumulates for the whole session now that the watchdog re-runs
+    # this script, so an old failure from boot must not be read as this attempt's reason.
+    if tail -n 50 "$LOG" 2>/dev/null | grep -q "fetch control key"; then
+      log "cannot reach controlplane.tailscale.com from this sandbox (egress blocked?);" \
+          "the auth key was never presented — continuing without the tailnet"
+    else
+      log "login failed; the key may have expired, or be single-use and already redeemed" \
+          "(TAILSCALE_KEY_REUSABLE=0) — see $LOG. Continuing without the tailnet"
+    fi
+    return 1
+  fi
+
+  log "no identity and no auth key; continuing without the tailnet"
+  return 1
 }
 
 main || log "unexpected error; continuing without the tailnet"

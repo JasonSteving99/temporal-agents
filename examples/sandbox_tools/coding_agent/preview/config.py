@@ -31,7 +31,14 @@ PROXY_PORT = int(os.environ.get("PREVIEW_PROXY_PORT", "8080"))
 # cannot be resumed, which would destroy the chat session, not just the preview. So the
 # proxy runs its own idle timer and calls pause() — which preserves filesystem AND
 # memory, so the agent's server is still running when a later request resumes it.
-AUTO_STOP_MINUTES = int(os.environ.get("PREVIEW_AUTO_STOP_MINUTES", "3"))
+#
+# "Idle" means nobody used the sandbox — not merely that no preview request arrived. The
+# agent's tool calls count, and proxy.py reads them off the sandbox's E2B lifetime rather
+# than seeing them directly (see _pause_when_idle). That heartbeat ticks ONCE PER TOOL CALL,
+# so this window must stay comfortably ABOVE the longest single tool activity (tools.py's
+# `bash` allows 3 minutes) or a slow build looks exactly like an idle box. 10 leaves margin;
+# do not lower it to the length of a tool call.
+AUTO_STOP_MINUTES = int(os.environ.get("PREVIEW_AUTO_STOP_MINUTES", "10"))
 
 # Lifetime handed to connect() when the proxy resumes a sandbox. It exists only as a
 # backstop against a leaked sandbox if the proxy dies before its idle timer fires, so it

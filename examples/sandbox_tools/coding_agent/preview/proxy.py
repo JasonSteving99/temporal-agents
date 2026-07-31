@@ -140,21 +140,76 @@ async def wait_for_server(
 # ---------------------------------------------------------------------------
 # Resume the sandbox if needed, then build its preview URL + traffic token.
 # ---------------------------------------------------------------------------
+async def _sandbox_state_and_deadline(sandbox_id: str):
+    """(state, end_at) for a sandbox, or (None, None) if E2B wouldn't say.
+
+    `end_at` is when E2B would KILL the sandbox for hitting its `timeout`. Nobody here wants
+    that to happen — it is read as a HEARTBEAT, because every party that touches a sandbox
+    rewrites it: remote-box calls `set_timeout` before each tool call, and our own `connect()`
+    in ensure_ready sets it too. So an `end_at` that CHANGED since we last looked means
+    "somebody used this sandbox", and one that didn't means "nobody did".
+
+    Changed, not advanced: the two parties set different lifetimes (the worker's
+    `sandbox_ttl_seconds` vs this proxy's SANDBOX_TIMEOUT_SECONDS), so a genuine touch can
+    move the deadline BACKWARD — reading that as "idle" would pause a sandbox mid-turn, which
+    is the exact failure this whole mechanism exists to prevent.
+    """
+    try:
+        info = await AsyncSandbox.get_info(sandbox_id=sandbox_id, api_key=E2B_API_KEY)
+    except Exception as e:
+        logger.info("could not read state of %s — %s: %s", sandbox_id, type(e).__name__, e)
+        return None, None
+    return str(getattr(info, "state", "")).lower(), getattr(info, "end_at", None)
+
+
 async def _pause_when_idle(sandbox_id: str) -> None:
-    """Pause the sandbox after AUTO_STOP_MINUTES without a preview request.
+    """Pause the sandbox once NOBODY has used it for AUTO_STOP_MINUTES — viewer or agent.
 
     E2B has no server-side idle stop, and its `timeout` KILLS rather than stops, so idling
     is managed here. pause() preserves memory as well as disk, so the agent's server is
     still running when the next request resumes it — no relaunch, no warm-up beyond the
     resume itself.
 
-    Pausing a sandbox the AGENT is mid-turn on is safe: remote-box resumes on its next tool
-    call (that is what its E2B `resume` does). The cost is latency on that call, not a
-    broken session.
+    THE AGENT'S ACTIVITY COUNTS, and it has to be read out of E2B rather than seen directly:
+    the agent's tool calls go worker -> E2B, never through this proxy, so preview traffic
+    alone is a false idle signal. Timing off preview traffic alone is what broke sessions —
+    a visit armed the timer, the visitor went back to the chat to watch the agent work, and
+    the pause landed squarely in the middle of a turn that was busy the whole time.
+
+    And a pause under a running turn is NOT harmless, despite what this docstring used to
+    claim. remote-box's session only auto-resumes a sandbox IT paused (`RemoteSession._paused`
+    is per-session state, and `_resume_if_paused` is a no-op when it is False), so a pause
+    that came from out here is invisible to it: the next tool call goes straight to
+    `set_timeout` + `commands.run` against a paused sandbox and fails, and so does every
+    retry. Hence the heartbeat check below, which is the whole point of the loop.
+
+    The lifetime E2B reports (`end_at`) is that heartbeat — see
+    :func:`_sandbox_state_and_deadline`. Each pass compares it to the previous pass; if it
+    moved, the sandbox was in use and we simply wait another window.
+
+    One limit worth knowing: the heartbeat ticks once per tool call, so a SINGLE tool call
+    that runs longer than the whole idle window still looks idle. Keep AUTO_STOP_MINUTES
+    comfortably above the longest tool activity timeout (tools.py's `bash` is 3 minutes) —
+    the default leaves margin for exactly this reason.
     """
+    window = AUTO_STOP_MINUTES * 60
     try:
-        await asyncio.sleep(AUTO_STOP_MINUTES * 60)
-        await AsyncSandbox.pause(sandbox_id=sandbox_id, api_key=E2B_API_KEY)
+        _state, last_seen = await _sandbox_state_and_deadline(sandbox_id)
+        while True:
+            await asyncio.sleep(window)
+            state, end_at = await _sandbox_state_and_deadline(sandbox_id)
+            if state is None:
+                return  # gone, or E2B isn't answering — either way there's nothing to pause
+            if state.endswith("paused"):
+                return  # somebody else got there first (the agent pauses between turns too)
+            if end_at is not None and end_at != last_seen:
+                # Used since the last pass — not idle, go round again. Also the path taken
+                # when `last_seen` is None because the very first read failed: adopt this
+                # deadline as the baseline rather than pausing on no evidence.
+                last_seen = end_at
+                continue
+            await AsyncSandbox.pause(sandbox_id=sandbox_id, api_key=E2B_API_KEY)
+            return
     except asyncio.CancelledError:
         raise
     except Exception as e:

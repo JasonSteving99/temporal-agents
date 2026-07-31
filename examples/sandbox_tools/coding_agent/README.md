@@ -103,7 +103,7 @@ replay). `tools.py` keeps the fields the snapshot's identity comes from in `SAND
 the provider `model_copy`s that and adds only `env_vars`, so what CI built and what runs can't drift
 apart. Offline builds pass it explicitly: `build_sandbox(SANDBOX, backend=SANDBOX_BACKEND)`.
 
-Keys are **single-use, ephemeral, pre-authorized and tagged**. The tag is the security boundary —
+Keys are **reusable, ephemeral, pre-authorized and tagged**. The tag is the security boundary —
 agent-written code runs as that node, so grant it the least your ACLs can. Two policy-file edits are
 required before this works at all (`tagOwners` for the tag, plus an `acls` rule) — see
 `deploy/.env.example`. With `TAILSCALE_API_KEY` unset the provider returns the plain config and
@@ -149,14 +149,31 @@ Further caveats:
   `/home/daytona/tailscale.env` rather than exported, so the agent's ordinary internet traffic (pip,
   npm, git) isn't silently pulled through the tailnet stack; point one command at the tailnet with
   `set -a; . /home/daytona/tailscale.env; set +a; curl http://host`.
-- **Restarts.** The key is single-use and the node is ephemeral, so a sandbox that is stopped and
-  started again (E2B pause is a SUSPEND, so the daemon simply survives it; Daytona's preview proxy
-  stops and starts routinely) rejoins using the `tailscaled.state` it
-  persisted — but only while the tailnet still recognises that node. Once an ephemeral node has been
-  offline long enough to be reaped, there is no second key to redeem and the sandbox comes back
-  without the tailnet (logged, never fatal). If sandboxes need to survive long stops, mint a
-  reusable key instead — flip `"reusable"` in `tailscale.py` and accept that a key read out of a
-  sandbox can then join more nodes.
+- **Long pauses used to end the tailnet permanently, and this is the fix.** The harness pauses the
+  sandbox between chat turns. E2B's pause is a SUSPEND, so `tailscaled` itself survives and a short
+  pause is invisible (measured: node still on the tailnet after 10 minutes paused, and `Running` the
+  instant it resumes). A *long* one is not: Tailscale reaps an ephemeral node that has been silent
+  long enough, and the sandbox then resumes holding a node key for a machine the control plane has
+  forgotten. Nothing in the old boot sequence ever looked again, so the tailnet — and with it the AI
+  gateway — simply stopped answering mid-session, with no error anywhere near the cause.
+
+  Two changes make it self-healing: keys are minted **reusable** (`tailscale.py`), and `boot.sh` runs
+  a **watchdog** that re-runs `tailscale_up.sh` every `TAILSCALE_WATCH_SECONDS` (default 30), which
+  re-redeems `TAILSCALE_AUTHKEY` with `--force-reauth` whenever this node is off the tailnet.
+
+  What the watchdog checks is not the obvious thing, and this is the part worth remembering:
+  **`BackendState` stays `Running` after the node is deleted.** `tailscale status` keeps printing the
+  old 100.x address and every peer it last knew about; only the daemon log says
+  `PollNetMap: initial fetch failed 404: node not found`, forever. The field that tells the truth is
+  `Self.Online`, which flips to `false` within ~20s of the deletion. A watchdog keyed on
+  `BackendState` alone sees a healthy node and does nothing — verified by deleting a paused sandbox's
+  device through the API, which is the same end state the reaper leaves. With the `Self.Online` check
+  (plus a 20s grace period, so a normal post-resume reconnect isn't mistaken for it) the same test
+  recovers in under a minute: new address, back on the tailnet, gateway answering. The cost is
+  that the key in the sandbox's env can join more than one node — always under the same tag, so it
+  reaches nothing the sandbox couldn't already reach. `TAILSCALE_KEY_REUSABLE=0` restores single-use
+  keys and the old behavior. The rejoin needs the key to still be valid, so
+  `TAILSCALE_KEY_EXPIRY_SECONDS` (default one day) now bounds how long a chat can idle.
 
 ### Building AI features with no API key
 
@@ -250,19 +267,29 @@ it needs a wildcard DNS record + a reverse proxy for wildcard TLS; see
 Resuming a sandbox on a preview hit would otherwise leave it billing compute forever. E2B has no
 server-side idle stop to delegate this to, and its `timeout` is **not** an equivalent — when an E2B
 timeout elapses the sandbox is *killed* and cannot be resumed, which would destroy the chat session,
-not just the preview. So the proxy runs its own idle timer (`PREVIEW_AUTO_STOP_MINUTES`, default `3`)
+not just the preview. So the proxy runs its own idle timer (`PREVIEW_AUTO_STOP_MINUTES`, default `10`)
 and calls `pause()`, which preserves everything; the next request resumes it. `PREVIEW_SANDBOX_TIMEOUT_SECONDS`
 (default ≥4× the idle window) is only a backstop against a leaked sandbox if the proxy dies before its
 timer fires.
 
-Pausing a sandbox the agent is mid-turn on is safe: remote-box resumes it on the next tool call. The
-cost is latency on that call, not a broken session.
+**Idle means nobody is using it — including the agent.** The agent's tool calls go worker → E2B and
+never touch this proxy, so preview traffic alone is a false idle signal. The timer therefore reads the
+sandbox's E2B lifetime (`end_at`) as a heartbeat: every tool call refreshes it, so a deadline that
+hasn't changed across a whole window means genuinely nobody used the box. Without that check the proxy
+would pause sandboxes mid-turn, and a pause from out here is **not** recoverable: remote-box only
+auto-resumes a sandbox its own session paused, so the next tool call — and every retry — fails against
+the paused box.
+
+The heartbeat ticks once per tool call, which is why the window must stay well above the longest tool
+activity (`bash` allows 3 minutes).
 
 ### Caveats (this is a demo, not production)
 
-- **Lifetime is tied to the chat session.** The harness stops the sandbox between turns (a container
-  sandbox's pause is stop — disk persists, processes are killed; the supervisor relaunches the server
-  on wake) and deletes it when the workflow ends. Once you close the session, the preview 404s.
+- **Lifetime is tied to the chat session.** The harness pauses the sandbox between turns and deletes
+  it when the workflow ends, so once you close the session the preview 404s. On E2B that pause is a
+  SUSPEND — memory and processes are frozen and come back on resume, so the agent's server does not
+  need relaunching. It is also invisible to remote-box unless remote-box did it, which is why the
+  preview proxy's own idle pause has to check first that nobody is using the box (above).
 - **Subdomain routing needs infra.** Previews require a wildcard DNS record and a reverse proxy that
   terminates wildcard TLS and preserves the Host header (see `deploy/README.md`). Set
   `PREVIEW_BASE_DOMAIN` to enable them; leave it unset and the agent simply won't offer previews.

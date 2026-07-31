@@ -51,8 +51,8 @@ feeds both the worker (the URL it hands the user) and the proxy (Host parsing). 
 previews off entirely.
 
 To put every sandbox on your **tailnet**, set `TAILSCALE_API_KEY` (and the `TAILSCALE_TAG` your ACLs
-grant against). The worker mints a single-use, ephemeral, tagged auth key per sandbox and injects it
-at creation; the sandbox redeems it on boot. This needs two edits to your tailnet policy file first
+grant against). The worker mints a reusable, ephemeral, tagged auth key per sandbox and injects it
+at creation; the sandbox redeems it on boot, and again whenever a long pause has cost it its node. This needs two edits to your tailnet policy file first
 (`tagOwners` for the tag, and an `acls` rule granting it) — both are spelled out in `.env.example`.
 Leave `TAILSCALE_API_KEY` blank to skip tailnet joining entirely.
 
@@ -292,8 +292,10 @@ docker compose pull && docker compose up -d
   — including in response to text it read off the internet. Grant the tag the narrowest access that
   makes it useful, never `autogroup:internet` or blanket subnet access. `TAILSCALE_API_KEY` itself is
   long-lived and can mint node keys: it stays in the worker's env and is never passed to a sandbox.
-  The per-sandbox key that IS passed in is single-use, ephemeral and short-expiry precisely because
-  it is readable by the agent (via its own `bash` tool) and recorded in Temporal history.
+  The per-sandbox key that IS passed in is ephemeral, tagged and expiring precisely because it is
+  readable by the agent (via its own `bash` tool) and recorded in Temporal history. It is *reusable*
+  so a paused session can rejoin the tailnet (`TAILSCALE_KEY_REUSABLE=0` to refuse that trade); every
+  node it can join carries the same tag, so it grants no reach the sandbox didn't already have.
 
 ## Notes & limitations
 

@@ -1,5 +1,5 @@
 # ABOUTME: The SandboxConfig BACKEND PROVIDER for this example — an async callable that mints a
-# fresh, single-use, ephemeral, tagged Tailscale auth key from the Tailscale API and hands back an
+# fresh, reusable, ephemeral, tagged Tailscale auth key from the Tailscale API and hands back an
 # E2B config carrying it as TAILSCALE_AUTHKEY. Registered on the worker by name
 # (`sandbox_activities({PROVIDER_NAME: e2b_with_tailscale})`, see worker.py); named by the agent
 # as its `SandboxConfig.backend` (see tools.py).
@@ -14,19 +14,22 @@
 # tailnet credential path. tools.py owns the template's identity (SANDBOX_BACKEND); this module only
 # copies it and adds env_vars.
 #
-# The key is single-use + ephemeral by design, so a leaked key is worth almost nothing: it can join
-# ONE node, that node is auto-removed from the tailnet when it disconnects, and the key expires on
-# its own (TAILSCALE_KEY_EXPIRY_SECONDS) whether used or not. Its blast radius inside the tailnet is
-# whatever your ACLs grant TAILSCALE_TAG — that tag is the actual security boundary, so write the ACL
-# for it before turning this on.
+# The key is ephemeral + tagged + short-lived by design, so a leaked key is worth little: every node
+# it joins is auto-removed from the tailnet when it disconnects, and the key expires on its own
+# (TAILSCALE_KEY_EXPIRY_SECONDS, default one day) whether used or not. Its blast radius inside the
+# tailnet is whatever your ACLs grant TAILSCALE_TAG — that tag is the actual security boundary, so
+# write the ACL for it before turning this on.
 #
-# Those properties are doing real work HERE specifically, not just in the sandbox: the provider's
-# return value is recorded in Temporal activity history (that's what makes it replay-safe) and
-# re-supplied to every later sandbox activity, so the key lands in your Temporal namespace's history
-# and in the sandbox's environment, where the agent's own `bash` tool can read it. A key that is
-# already redeemed, cannot be redeemed twice, and belongs to a node that removes itself is close to
-# inert by the time it is at rest in either place. Do NOT swap in a long-lived reusable key without
-# accepting that trade.
+# It is deliberately REUSABLE, which is the one property here that costs you something. It buys the
+# sandbox the ability to rejoin the tailnet after Tailscale garbage-collects its ephemeral node during
+# a long pause — without it the tailnet silently disappears mid-session and never comes back. See
+# mint_ephemeral_authkey for the full argument, and TAILSCALE_KEY_REUSABLE=0 to opt out.
+#
+# That matters HERE specifically, not just in the sandbox: the provider's return value is recorded in
+# Temporal activity history (that's what makes it replay-safe) and re-supplied to every later sandbox
+# activity, so the key lands in your Temporal namespace's history and in the sandbox's environment,
+# where the agent's own `bash` tool can read it. Keep the expiry short and the ACL tight; those, not
+# single-use, are what bound a key at rest.
 
 import logging
 import os
@@ -82,38 +85,74 @@ def _tag() -> str:
 
 
 async def mint_ephemeral_authkey(session: aiohttp.ClientSession) -> str:
-    """Mint one single-use, ephemeral, pre-authorized auth key tagged with :func:`_tag`.
+    """Mint one reusable, ephemeral, pre-authorized auth key tagged with :func:`_tag`.
 
     Each property is doing a job:
       * **ephemeral** — the node is removed from the tailnet automatically once it disconnects, so
         dead sandboxes (of which this deployment makes many) don't accumulate as stale machines.
-      * **reusable: false** — the key joins exactly one node, so a key captured from the sandbox's
-        own environment can't be replayed to join another.
       * **preauthorized** — the node is usable immediately, without a manual approve step in the
         admin console, which no one is present for when a workflow creates a sandbox.
       * **tags** — the node gets an identity your ACLs can grant/deny against. Nothing else about
         the sandbox is trusted by the tailnet.
+      * **reusable** — the key can be REDEEMED AGAIN by the same sandbox, which is what lets it get
+        back on the tailnet after a long idle. See below; this one was `false` and it was a bug.
+
+    Why reusable, when single-use is obviously the safer setting: it is what makes the tailnet
+    survive a paused session. The harness pauses the sandbox between turns, and Tailscale eventually
+    reaps an EPHEMERAL node that has stopped talking to the control plane — measured on this tailnet
+    by pausing a joined sandbox and watching the devices API: still listed at 10 minutes and at an
+    hour, gone at ~74 minutes. A user who leaves the chat over lunch therefore comes back to a sandbox
+    whose node no longer exists, and tailscaled can only get back in by logging in again — which needs
+    a key that can still be redeemed. A single-use key was already spent at boot, so the sandbox was
+    stuck OFF the tailnet for the rest of the session with no way to recover: the AI gateway and every
+    other tailnet service simply stopped answering, mid-session, for no visible reason. The in-sandbox
+    watchdog (tailscale_up.sh, re-run by boot.sh) redeems this key again and the node comes back.
+
+    Note what does NOT cause the removal, since it looks like the obvious suspect: this key expiring.
+    Verified with a deliberately 5-minute key — the node it registered was still on the tailnet 12
+    minutes later, because a tagged node has key expiry disabled. The expiry below matters for the
+    REJOIN (an expired key can't be redeemed again), not for the node's survival.
+
+    What that costs, stated plainly: the key sits in the sandbox's own environment, where the agent's
+    `bash` tool can read it, and it can now join MORE THAN ONE node to your tailnet rather than
+    exactly one. Every node it joins is still stamped with :func:`_tag`, so it can reach nothing the
+    sandbox itself couldn't already reach — the tag remains the entire security boundary, and a
+    prompt-injected agent inside the sandbox never needed a second node to abuse it. It is also still
+    ephemeral (those nodes remove themselves) and still expires on its own
+    (``TAILSCALE_KEY_EXPIRY_SECONDS``). If that trade is wrong for your tailnet, set
+    ``TAILSCALE_KEY_REUSABLE=0`` — sandboxes then join once and stay off the tailnet after a long
+    idle, which is the old behavior, bug included.
 
     The caller's API token must itself be an owner of that tag (`tagOwners` in your ACL), or the
     API rejects the request — that error is surfaced as-is, since it needs an ACL edit to fix.
     """
     token = os.environ["TAILSCALE_API_KEY"]
     tailnet = os.environ.get("TAILSCALE_TAILNET", "-").strip() or "-"
-    expiry = int(os.environ.get("TAILSCALE_KEY_EXPIRY_SECONDS", "3600"))
+    expiry = int(os.environ.get("TAILSCALE_KEY_EXPIRY_SECONDS", "86400"))
+    # Empty counts as unset (a blank line in a .env file is not a decision), so only an explicit
+    # off-value turns this off.
+    reusable = (os.environ.get("TAILSCALE_KEY_REUSABLE", "").strip().lower() or "1") not in (
+        "0",
+        "false",
+        "no",
+    )
 
     payload = {
         "capabilities": {
             "devices": {
                 "create": {
-                    "reusable": False,
+                    "reusable": reusable,
                     "ephemeral": True,
                     "preauthorized": True,
                     "tags": [_tag()],
                 }
             }
         },
-        # Bounds how long an UNUSED key is worth stealing. It does not bound the session: a key that
-        # has already been redeemed keeps its node online past this.
+        # Bounds how long the key is worth stealing — and, because the key is redeemed AGAIN
+        # whenever the sandbox has to rejoin (see above), it also bounds how long a session can
+        # idle and still recover its tailnet. Default one day: long enough to cover a chat someone
+        # comes back to tomorrow, short enough that a key recovered from a dead sandbox is not a
+        # standing credential.
         "expirySeconds": expiry,
         # Shown against the key in the admin console. Tailscale validates this tightly: max 50
         # characters, and punctuation beyond `-`/`_`/`.` is rejected outright with
@@ -157,7 +196,7 @@ async def e2b_with_tailscale() -> E2B:
     Safe to run more than once per sandbox, as the provider contract requires: `sandbox_activate` is
     an ordinary activity, so a retried attempt calls this again before any result was recorded. Each
     call mints a NEW key rather than consuming a shared one, and the abandoned key from the previous
-    attempt is single-use-but-unused, so it simply expires.
+    attempt was never redeemed, so it simply expires.
     """
     if not os.environ.get("TAILSCALE_API_KEY"):
         logger.info("TAILSCALE_API_KEY unset — sandbox will not join a tailnet")
