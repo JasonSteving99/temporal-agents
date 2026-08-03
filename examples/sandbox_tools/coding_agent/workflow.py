@@ -43,7 +43,10 @@ with workflow.unsafe.imports_passed_through():
 
 
 TASK_QUEUE = "sandboxed-coding-agent"
-DEFAULT_MODEL = "gpt-5.1"
+# Terra, not Luna: this agent's turns are long multi-step tool work (scaffold, install, build, fix),
+# which is the tier Terra is for. Luna is the cheap/fast tier — swap this one line if you'd rather
+# trade capability for cost, since `self._model` is the only thing that reads it.
+DEFAULT_MODEL = "gpt-5.6-terra"
 
 # `summary="auto"` is what makes the reasoning stream visible: the harness's OpenAI observer turns
 # `response.reasoning_summary_text.delta` events into `thought_summary` turn events, and without a
@@ -124,17 +127,29 @@ a one-line "Share -> Add to Home Screen" hint instead."""
 # than typed out, exactly like the preview URL's domain and sandbox-id var. Hardcoding a model into
 # the prompt is the same mistake as the Daytona-era `/home/daytona` paths — it survives the config
 # change that invalidated it and quietly ships instructions that don't run.
-_OPENAI_MODEL_PREFIXES = ("gpt", "o1", "o3", "o4")
+#
+# Routing is STRICT: the gateway rejects a cross-family call rather than translating it, e.g.
+#   model "gemini-3.6-flash" is available via gemini_generate_content, not openai_responses
+# so guessing a library for an unrecognised id produces a confident, broken instruction. An id this
+# can't classify is therefore DROPPED from the instruction entirely — better the agent never hears of
+# a model than hears of one with the wrong recipe. That is not hypothetical: the same gateway also
+# lists `claude-*` (Anthropic Messages) and a `gpt-5.5` codex route, and neither is auto-authorized
+# from the sandbox the way the OpenAI and Gemini routes are.
+_MODEL_FAMILIES = (("openai", ("gpt", "o1", "o3", "o4")), ("gemini", ("gemini",)))
 
 
-def _is_openai_model(model: str) -> bool:
-    return model.lower().startswith(_OPENAI_MODEL_PREFIXES)
+def _model_family(model: str) -> str | None:
+    lowered = model.lower()
+    return next((fam for fam, pre in _MODEL_FAMILIES if lowered.startswith(pre)), None)
 
 
-_GATEWAY_MODELS = [m.strip() for m in AI_GATEWAY_MODELS.split(",") if m.strip()]
+_GATEWAY_MODELS = [
+    m for m in (part.strip() for part in AI_GATEWAY_MODELS.split(",")) if m and _model_family(m)
+]
+_GATEWAY_MODEL_LIST = ", ".join(_GATEWAY_MODELS)
 _GATEWAY_DEFAULT = _GATEWAY_MODELS[0] if _GATEWAY_MODELS else ""
-_GATEWAY_OPENAI = next((m for m in _GATEWAY_MODELS if _is_openai_model(m)), "")
-_GATEWAY_GEMINI = next((m for m in _GATEWAY_MODELS if not _is_openai_model(m)), "")
+_GATEWAY_OPENAI = next((m for m in _GATEWAY_MODELS if _model_family(m) == "openai"), "")
+_GATEWAY_GEMINI = next((m for m in _GATEWAY_MODELS if _model_family(m) == "gemini"), "")
 
 # One worked example per API the gateway actually serves. Each is emitted only if the model list
 # contains a model of that family, so a gateway serving just one of the two never shows the agent a
@@ -184,7 +199,7 @@ _AI_INSTRUCTION = f"""
 
 This sandbox can reach a **pre-authenticated AI gateway** at {AI_GATEWAY_URL} — no API key \
 exists or is needed; access is granted by the sandbox itself. Use it whenever the user asks for AI \
-features. Models available, best first: {AI_GATEWAY_MODELS}. Default to `{_GATEWAY_DEFAULT}` unless \
+features. Models available, best first: {_GATEWAY_MODEL_LIST}. Default to `{_GATEWAY_DEFAULT}` unless \
 the task gives you a reason to pick another.
 
 The gateway fronts two APIs, so match the library to the model you picked — the snippets below run \
@@ -209,7 +224,8 @@ command output you didn't actually read."""
 SYSTEM_INSTRUCTION = (
     _BASE_INSTRUCTION
     + (_PREVIEW_INSTRUCTION if PREVIEW_BASE_DOMAIN else "")
-    + (_AI_INSTRUCTION if AI_GATEWAY_URL else "")
+    # Both must hold: a URL with no recognisable model behind it has no usable recipe to offer.
+    + (_AI_INSTRUCTION if AI_GATEWAY_URL and _GATEWAY_MODELS else "")
     + _CLOSING_INSTRUCTION
 )
 
