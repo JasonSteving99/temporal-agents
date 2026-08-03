@@ -14,10 +14,11 @@ dependencies = [
     # it). The sandbox image has no lock and pins the SHA inline instead, so after every bump copy
     # the lock's resolved SHA into examples/sandbox_tools/coding_agent/pyproject.toml or the two
     # images drift apart — see "Updating the harness" in examples/Dockerfile.sandbox-coding-agent.
-    #   sandbox -> remote-box (+ the E2B/Daytona SDKs)  the tools run in an E2B cloud sandbox
-    #   ui      -> fastapi[standard] (+ uvicorn)     the packaged web app + browser UI (dist ships in the wheel)
-    #   genai   -> google-genai (+ google-auth)      the agent drives the Gemini Interactions API
-    "temporal-agent-harness[sandbox,ui,genai] @ git+https://github.com/temporal-community/temporal-agent-harness.git@sandbox-tools",
+    #   sandbox       -> remote-box (+ the E2B/Daytona SDKs)  the tools run in an E2B cloud sandbox
+    #   ui            -> fastapi[standard] (+ uvicorn)  the packaged web app + browser UI (dist ships in the wheel)
+    #   openai-agents -> openai-agents + mcp + temporalio[opentelemetry]  the agent drives the
+    #                    OpenAI Agents SDK through the harness's vendored OpenAIAgentsPlugin
+    "temporal-agent-harness[sandbox,ui,openai-agents] @ git+https://github.com/temporal-community/temporal-agent-harness.git@sandbox-tools",
     # remote-box, pinned AHEAD of the harness's own constraint (which would resolve 0.7.0 from
     # PyPI). 0.9.0 adds what the E2B backend needs to carry a per-sandbox credential:
     # `E2B.env_vars` (0.7.0 had none — only Daytona did) and `post_create_cmd`, a root, backgrounded
@@ -31,11 +32,10 @@ dependencies = [
     # update_network cannot change it — so it has to come through remote-box.
     # Pinned above the harness's own constraint, which would otherwise resolve an older PyPI release.
     "remote-box>=0.10.0",
-    # Pin google-genai to the exact version the harness `sandbox-tools` branch was built against.
-    # The Gemini plugin imports the private `google.genai._interactions` module, which was removed
-    # (renamed to a public `interactions.py`) in later releases — 2.14.0 breaks import. 2.8.0 is what
-    # upstream's own lock pinned, so it's the known-good version.
-    "google-genai==2.8.0",
+    # NB: no google-genai here any more. The agent itself drives the OpenAI Agents SDK, and the only
+    # remaining mention of `google-genai` is the *prompt text* telling the agent how to call the AI
+    # gateway from inside the sandbox — the agent `pip install`s it THERE, in the box, at which point
+    # it is that sandbox's dependency and not this image's.
     # the preview/ package imports aiohttp directly (the upstream justfile injected it ad-hoc via
     # `uv run --with aiohttp`); declare it so it's baked into the image.
     "aiohttp>=3.9",

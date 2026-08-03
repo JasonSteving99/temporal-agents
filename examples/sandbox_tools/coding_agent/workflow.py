@@ -1,25 +1,26 @@
-# ABOUTME: A conversational CODING agent whose tools run inside a Daytona cloud sandbox (not on the
+# ABOUTME: A conversational CODING agent whose tools run inside an E2B cloud sandbox (not on the
 # user's machine, and not via callback). Same six tools as the callback coding agent, but declared as
 # @agent.activity_tool_defn(sandboxed=True) — the work happens in a disposable box, on a project that
 # lives there. Pairs with the live-preview proxy: the agent builds a web app in the box and you
-# preview it. The conversational loop is the SHARED examples.coding_agent_common.chat_loop.
-
-from datetime import timedelta
+# preview it. The model is driven by the OPENAI AGENTS SDK: `Runner.run_streamed` owns the
+# tool-calling loop, so there is no hand-rolled loop here (the Gemini-era
+# examples.coding_agent_common.chat_loop is gone).
 
 from temporalio import workflow
 from temporalio.contrib.workflow_streams import WorkflowStream
-from temporalio.workflow import ActivityConfig
 
 # EVERY temporal_agent_harness / remote-box import must live in this ONE block (take "every"
-# literally — chat_loop, todo_tools, tools, agent_protocol, the plugin glue). remote-box (pulled in
+# literally — todo_tools, tools, agent_protocol, the plugin glue). remote-box (pulled in
 # transitively by tools.py) needs pass-through treatment, and splitting even one harness import out
 # was enough to load two copies of agent_workflow.py — each with its own _CURRENT_RUNNER contextvar —
-# so a sandboxed tool call fails with "tool ... has no active runner".
+# so a sandboxed tool call fails with "tool ... has no active runner". The `agents` SDK and its
+# `openai` dependency belong here too: both do module-level I/O-ish work the workflow sandbox rejects.
 with workflow.unsafe.imports_passed_through():
-    from temporal_agent_harness.ai_sdks.google_genai_plugin import (
-        function_param,
-        google_genai_client,
-    )
+    from agents import Agent as OpenAIAgent
+    from agents import ModelSettings, Runner, TResponseInputItem
+    from openai.types.shared import Reasoning
+
+    from temporal_agent_harness.ai_sdks.openai_agents_harness import as_openai_agent_tool
     from temporal_agent_harness.harness import AgentWorkflowRunner, agent
     from temporal_agent_harness.harness.agent_protocol import (
         AgentConfig,
@@ -28,10 +29,6 @@ with workflow.unsafe.imports_passed_through():
         ToolApprovalPolicy,
     )
 
-    from examples.coding_agent_common.chat_loop import (
-        dispatch_via_runner,
-        run_chat_turn,
-    )
     from examples.coding_agent_common.todo_tools import todoread, todowrite
 
     from .tools import (
@@ -46,9 +43,20 @@ with workflow.unsafe.imports_passed_through():
 
 
 TASK_QUEUE = "sandboxed-coding-agent"
-DEFAULT_MODEL = "gemini-3.6-flash"
+DEFAULT_MODEL = "gpt-5.1"
 
-GENERATION_CONFIG = {"thinking_level": "low", "thinking_summaries": "auto"}
+# `summary="auto"` is what makes the reasoning stream visible: the harness's OpenAI observer turns
+# `response.reasoning_summary_text.delta` events into `thought_summary` turn events, and without a
+# requested summary the API emits none (the Gemini-era equivalent was `thinking_summaries: "auto"`).
+# Low effort matches the old `thinking_level: "low"` — this agent's work is mostly tool calls, and
+# reasoning tokens on every hop is the expensive way to do them.
+MODEL_SETTINGS = ModelSettings(reasoning=Reasoning(effort="low", summary="auto"))
+
+# The SDK's `Runner` counts one "turn" per model call and gives up at 10 by default — a ceiling a
+# coding agent hits in the middle of a routine task (scaffold, install, build, fix, re-run) and then
+# dies with MaxTurnsExceeded. The Gemini chat_loop had no such bound; keep the bound (a runaway loop
+# should still end) but set it where only a genuinely stuck agent reaches it.
+MAX_MODEL_TURNS = 100
 
 
 _BASE_INSTRUCTION = f"""\
@@ -174,17 +182,16 @@ class SandboxedCodingAgentWorkflow:
             sandbox=SANDBOX,
         )
         self._model: str = DEFAULT_MODEL
-        self._previous_interaction_id: str | None = None
-        self._tools = [*SANDBOXED_CODING_TOOLS, todowrite, todoread]
-        self._tools_by_name = {tool.__name__: tool for tool in self._tools}
         self._todos: list = []
+        # Conversation state, threaded across turns as the SDK's own input-item list. This replaces
+        # the Gemini `previous_interaction_id` handle: OpenAI's Responses conversation state is not
+        # server-side here, so the workflow carries the transcript itself — which suits the harness
+        # (it is durable workflow state, restored on replay, with no dependency on the provider
+        # still holding the prior interaction).
+        self._conversation: list[TResponseInputItem] = []
 
     @workflow.run
     async def run(self, _config: AgentConfig) -> None:
-        self._gemini = google_genai_client(
-            activity_config=ActivityConfig(start_to_close_timeout=timedelta(minutes=3)),
-            runner=self._runner,
-        )
         await self._runner.run(self)
 
     @agent.accepts
@@ -192,23 +199,45 @@ class SandboxedCodingAgentWorkflow:
         """Chat with the sandboxed coding agent. Ask it to build an app, add a feature, or run
         something; it works on a project inside a cloud sandbox and can serve a web app for live
         preview. Mutating tools pause for your approval."""
-        reply_text, self._previous_interaction_id = await run_chat_turn(
-            self._gemini,
+        sdk_agent = OpenAIAgent(
+            name="SandboxedCodingAgent",
+            instructions=SYSTEM_INSTRUCTION,
             model=self._model,
-            system_instruction=SYSTEM_INSTRUCTION,
-            user_text=message.text,
-            tools=[function_param(tool) for tool in self._tools],
-            previous_interaction_id=self._previous_interaction_id,
-            dispatch_tool=self._dispatch_tool,
-            generation_config=GENERATION_CONFIG,
+            model_settings=MODEL_SETTINGS,
+            tools=self._openai_tools(),
         )
-        return TextReply(text=reply_text)
+        input_items: list[TResponseInputItem] = [
+            *self._conversation,
+            {"role": "user", "content": message.text},
+        ]
 
-    def _dispatch_tool(self, call):
-        """Bind this workflow's runner/toolset/todo state into the shared dispatcher."""
-        return dispatch_via_runner(
-            call,
-            runner=self._runner,
-            tools_by_name=self._tools_by_name,
-            todo_sink=self._todos,
+        # run_streamed returns immediately; draining its events is what drives the turn to
+        # completion. `context=self._runner` is the harness seam — worker.py wires the plugin's
+        # `stream_to_provider` to read this turn's stream context off the runner, so live model
+        # events reach the attached UI.
+        result = Runner.run_streamed(
+            sdk_agent,
+            input=input_items,
+            context=self._runner,
+            max_turns=MAX_MODEL_TURNS,
         )
+        async for _event in result.stream_events():
+            pass
+
+        self._conversation = result.to_input_list()
+        return TextReply(text=str(result.final_output))
+
+    def _openai_tools(self):
+        """Adapt this agent's harness tools onto the SDK, rebuilt per turn.
+
+        `as_openai_agent_tool` keeps every harness guarantee — approval policy, tool_start/end/error
+        events, and for the six sandboxed tools the durable in-sandbox activity dispatch. The two
+        todo tools declare `sink: agent.Injected[list]`, which is hidden from the model's schema and
+        supplied HERE, per call, as this workflow's durable todo state (the same binding the Gemini
+        dispatcher did by hand).
+        """
+        injected = {todowrite: {"sink": self._todos}, todoread: {"sink": self._todos}}
+        return [
+            as_openai_agent_tool(self._runner, tool, injections=injected.get(tool))
+            for tool in (*SANDBOXED_CODING_TOOLS, todowrite, todoread)
+        ]

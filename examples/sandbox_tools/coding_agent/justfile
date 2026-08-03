@@ -18,7 +18,7 @@
 #
 # `just worker`/`just build-sandbox` need BOTH the optional `sandbox` extra (remote-box, Python
 # >= 3.12) and the `examples` dependency group. First-time setup: `cp .env.example .env.local` from
-# the repo root and fill in the Temporal connection + GEMINI_API_KEY + DAYTONA_API_KEY.
+# the repo root and fill in the Temporal connection + OPENAI_API_KEY + E2B_API_KEY.
 
 set dotenv-path := "../../../.env.local"
 set dotenv-load := true

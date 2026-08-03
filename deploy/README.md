@@ -21,7 +21,7 @@ don't run the template build by hand.
 
 - Docker + the Compose plugin on the host.
 - A **Temporal Cloud** namespace + an API key (or client cert for mTLS).
-- `GEMINI_API_KEY` and `E2B_API_KEY` (plus `TAILSCALE_OAUTH_CLIENT_SECRET` if you want sandboxes on
+- `OPENAI_API_KEY` and `E2B_API_KEY` (plus `TAILSCALE_OAUTH_CLIENT_SECRET` if you want sandboxes on
   your tailnet).
 - The GHCR image published (below).
 - For live preview: a **domain you control**, a **wildcard DNS record** `*.<preview-domain>` pointing
@@ -43,7 +43,7 @@ don't run the template build by hand.
 From this `deploy/` directory:
 
 ```bash
-cp .env.example .env                          # fill GEMINI_API_KEY, E2B_API_KEY, PREVIEW_BASE_DOMAIN
+cp .env.example .env                          # fill OPENAI_API_KEY, E2B_API_KEY, PREVIEW_BASE_DOMAIN
 cp temporal.cloud.toml.example temporal.toml  # fill Temporal Cloud address / namespace / api_key
 ```
 

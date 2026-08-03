@@ -2,7 +2,7 @@
 
 A trimmed fork of [`temporal-community/temporal-agent-harness`](https://github.com/temporal-community/temporal-agent-harness)
 that keeps **only** the [sandboxed coding agent example](examples/sandbox_tools/coding_agent) and the
-pieces needed to **self-host it**: a Gemini coding agent, running durably on **Temporal**, whose
+pieces needed to **self-host it**: an OpenAI coding agent, running durably on **Temporal**, whose
 `bash`/`read`/`write`/`edit`/`grep`/`glob` tools execute inside an isolated **E2B cloud sandbox**.
 
 The harness itself is **not** vendored here — it's pulled as a git dependency on the upstream repo's
@@ -15,7 +15,7 @@ code plus the deployment glue.
 examples/
   app.py                     # FastAPI + UI entrypoint (thin wrapper over the harness web app)
   session_manager_worker.py  # shared session-manager worker
-  coding_agent_common/       # shared tool impls, todo tools, Gemini chat loop
+  coding_agent_common/       # shared tool impls, todo tools
   sandbox_tools/coding_agent/# the agent: tools, workflow, worker, preview proxy, snapshot image
   Dockerfile.sandbox-coding-agent-e2b  # the E2B template the tools run in (built by `build-sandbox`)
   Dockerfile.sandbox-coding-agent      # the old Daytona snapshot, kept for reference only
