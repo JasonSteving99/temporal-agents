@@ -15,8 +15,10 @@ Env vars (set in .env.local — see .env.example):
     GEMINI_API_KEY                            required — the agent calls the Gemini API
     E2B_API_KEY                               required — the tools run on an E2B sandbox
     SANDBOXED_CODING_AGENT_TASK_QUEUE         task queue to poll (default: sandboxed-coding-agent)
-    TAILSCALE_API_KEY                         optional — mints each sandbox's tailnet auth key;
+    TAILSCALE_OAUTH_CLIENT_SECRET             optional — lets each sandbox mint its own tailnet key;
                                               unset means sandboxes join no tailnet (see tailscale.py)
+    TAILSCALE_TAG                             the ACL tag those sandboxes advertise
+                                              (default: tag:agent-artifact)
 """
 
 import asyncio

@@ -74,7 +74,7 @@ AI_GATEWAY_MODELS = os.environ.get(
 #
 # post_create_cmd runs boot.sh: join the tailnet, then supervise the agent's start.sh (what makes a
 # site previewable). It's fired once after creation, as root, backgrounded, and inherits `env_vars` —
-# so it sees the TAILSCALE_AUTHKEY the provider minted.
+# so it sees the TAILSCALE_AUTHKEY and TAILSCALE_TAG the provider supplied.
 # A template START command could not: E2B runs that while the TEMPLATE builds and snapshots the
 # running process into every sandbox, so it starts before any sandbox env exists (and remote-box
 # translates a Dockerfile CMD/ENTRYPOINT into exactly that, then overrides it — hence no CMD in the

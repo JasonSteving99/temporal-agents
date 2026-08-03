@@ -31,7 +31,8 @@ config (`sandbox=SANDBOX`), the worker, and the snapshot image.
 - `GEMINI_API_KEY` — the agent calls the Gemini Interactions API.
 - `E2B_API_KEY` — the tools run in a real E2B cloud sandbox, and `just build-sandbox` builds its template.
 - `DAYTONA_API_KEY` / `DAYTONA_TARGET` *(optional)* — only for the Daytona backend and its preview proxy.
-- `TAILSCALE_API_KEY` *(optional)* — puts each sandbox on your tailnet (see [Tailnet](#tailnet)).
+- `TAILSCALE_OAUTH_CLIENT_SECRET` *(optional)* — puts each sandbox on your tailnet (see
+  [Tailnet](#tailnet)).
 
 All go in the repo-root `.env.local` (see `.env.example`).
 
@@ -80,16 +81,17 @@ header of [`examples/Dockerfile.sandbox-coding-agent`](../../Dockerfile.sandbox-
 ## Tailnet
 
 Each sandbox joins your Tailscale tailnet, as a node tagged `tag:agent-artifact`. This is the
-example's use of `SandboxConfig`'s **backend provider**: an auth key has to be minted per sandbox by
-an HTTP call, so no literal `E2B(...)` in `tools.py` could carry one. Instead `tools.py` names a
-provider and [`tailscale.py`](tailscale.py) supplies the callable:
+example's use of `SandboxConfig`'s **backend provider**: the tailnet credential comes from the
+worker's environment and has to ride into the sandbox as an `env_var`, so no literal `E2B(...)` in
+`tools.py` could carry one. Instead `tools.py` names a provider and [`tailscale.py`](tailscale.py)
+supplies the callable:
 
 ```
 tools.py      SANDBOX = SandboxConfig(backend="e2b-tailscale", ...)    # a NAME
 worker.py     sandbox_activities({PROVIDER_NAME: e2b_with_tailscale})  # the CALLABLE
 ```
 
-The key is consumed by `tailscale_up.sh`, baked into the template and run as the E2B backend's
+The credential is consumed by `tailscale_up.sh`, baked into the template and run as the E2B backend's
 **`post_create_cmd`** — fired once per sandbox after creation, as root, in the background, inheriting
 the sandbox's `env_vars`. That hook is the *only* place it can be consumed: a template **start
 command** runs while the template BUILDS and is snapshotted into every sandbox, so it starts before
@@ -97,17 +99,32 @@ any sandbox (and any per-sandbox env var) exists. remote-box translates a Docker
 `CMD`/`ENTRYPOINT` into exactly that start command, which is why the E2B Dockerfile has neither.
 
 The harness resolves the name inside `sandbox_activate`, once per workflow run, on the turn that
-creates the sandbox — so the key is minted at sandbox-creation time, off the workflow thread, and
-the resolved config is recorded in history and reused for the rest of the run (never re-minted on
-replay). `tools.py` keeps the fields the snapshot's identity comes from in `SANDBOX_BACKEND`, and
-the provider `model_copy`s that and adds only `env_vars`, so what CI built and what runs can't drift
-apart. Offline builds pass it explicitly: `build_sandbox(SANDBOX, backend=SANDBOX_BACKEND)`.
+creates the sandbox — off the workflow thread, with the resolved config recorded in history and
+reused for the rest of the run. `tools.py` keeps the fields the snapshot's identity comes from in
+`SANDBOX_BACKEND`, and the provider `model_copy`s that and adds only `env_vars`, so what CI built and
+what runs can't drift apart. Offline builds pass it explicitly:
+`build_sandbox(SANDBOX, backend=SANDBOX_BACKEND)`.
 
-Keys are **reusable, ephemeral, pre-authorized and tagged**. The tag is the security boundary —
-agent-written code runs as that node, so grant it the least your ACLs can. Two policy-file edits are
-required before this works at all (`tagOwners` for the tag, plus an `acls` rule) — see
-`deploy/.env.example`. With `TAILSCALE_API_KEY` unset the provider returns the plain config and
-sandboxes join nothing, so the example still runs without Tailscale.
+**The sandbox mints its own keys.** What `TAILSCALE_AUTHKEY` carries is not an auth key but an OAuth
+client secret (`tskey-client-…`) with `?preauthorized=true&ephemeral=true` appended. The `tailscale`
+CLI recognizes that prefix and, on every `up`, does an OAuth2 exchange with `api.tailscale.com` and
+mints itself a fresh **single-use, ephemeral, pre-authorized** key stamped with `TAILSCALE_TAG` —
+which is why that tag is mandatory here (`--advertise-tags`; the CLI refuses to mint without one).
+This is the same mechanism [`tailscale/github-action`](https://github.com/tailscale/github-action)
+uses to get a CI runner onto a tailnet, and it exists in the CLI itself, not the action
+(`feature/oauthkey/oauthkey.go`).
+
+Carrying the minting capability rather than a key is what makes the rejoin below work at all hours
+and any number of times; a pre-minted key had to be *reusable* and *unexpired* to manage it even
+once. The cost is real and worth stating: an OAuth client secret does **not** expire, and this one
+lives in the sandbox's env where the agent's own `bash` tool can read it, plus in Temporal history.
+It grants no extra reach — the CLI can only mint for tags the client owns, and every node it joins
+carries the same tag — so scope the client to `auth_keys` on that one tag and rotate it on a
+schedule. The tag remains the security boundary: agent-written code runs as that node, so grant it
+the least your ACLs can. Two policy-file edits are required before any of this works (`tagOwners`
+for the tag, plus an `acls` rule) — see `deploy/.env.example`. With
+`TAILSCALE_OAUTH_CLIENT_SECRET` unset the provider returns the plain config and sandboxes join
+nothing, so the example still runs without Tailscale.
 
 Getting `tailscaled` to work inside an E2B sandbox took three fixes, each documented at length where
 it lives, because every one of them presents as "the auth key was rejected" when it is nothing of the
@@ -157,9 +174,13 @@ Further caveats:
   forgotten. Nothing in the old boot sequence ever looked again, so the tailnet — and with it the AI
   gateway — simply stopped answering mid-session, with no error anywhere near the cause.
 
-  Two changes make it self-healing: keys are minted **reusable** (`tailscale.py`), and `boot.sh` runs
-  a **watchdog** that re-runs `tailscale_up.sh` every `TAILSCALE_WATCH_SECONDS` (default 30), which
-  re-redeems `TAILSCALE_AUTHKEY` with `--force-reauth` whenever this node is off the tailnet.
+  Two changes make it self-healing: the sandbox holds a credential it can mint **new keys** with
+  (`tailscale.py`), and `boot.sh` runs a **watchdog** that re-runs `tailscale_up.sh` every
+  `TAILSCALE_WATCH_SECONDS` (default 30), which re-authenticates with `--force-reauth` whenever this
+  node is off the tailnet — retrying with backoff (`TS_UP_ATTEMPTS`), and, if a re-auth still can't
+  make the saved identity work, deleting `tailscaled.state` and registering as a brand-new node. That
+  last step is only affordable because keys are no longer scarce; it's the in-sandbox equivalent of
+  the GitHub Action's `tailscaled --state=mem:`, which starts every CI run from a clean identity.
 
   What the watchdog checks is not the obvious thing, and this is the part worth remembering:
   **`BackendState` stays `Running` after the node is deleted.** `tailscale status` keeps printing the
@@ -169,11 +190,9 @@ Further caveats:
   `BackendState` alone sees a healthy node and does nothing — verified by deleting a paused sandbox's
   device through the API, which is the same end state the reaper leaves. With the `Self.Online` check
   (plus a 20s grace period, so a normal post-resume reconnect isn't mistaken for it) the same test
-  recovers in under a minute: new address, back on the tailnet, gateway answering. The cost is
-  that the key in the sandbox's env can join more than one node — always under the same tag, so it
-  reaches nothing the sandbox couldn't already reach. `TAILSCALE_KEY_REUSABLE=0` restores single-use
-  keys and the old behavior. The rejoin needs the key to still be valid, so
-  `TAILSCALE_KEY_EXPIRY_SECONDS` (default one day) now bounds how long a chat can idle.
+  recovers in under a minute: new address, back on the tailnet, gateway answering. Nothing now bounds
+  how long a chat can idle and still get its tailnet back — the earlier version of this fix passed a
+  reusable key with an expiry, so a chat resumed after that expiry was still stranded.
 
 ### Building AI features with no API key
 

@@ -21,7 +21,8 @@ don't run the template build by hand.
 
 - Docker + the Compose plugin on the host.
 - A **Temporal Cloud** namespace + an API key (or client cert for mTLS).
-- `GEMINI_API_KEY` and `E2B_API_KEY` (plus `TAILSCALE_API_KEY` if you want sandboxes on your tailnet).
+- `GEMINI_API_KEY` and `E2B_API_KEY` (plus `TAILSCALE_OAUTH_CLIENT_SECRET` if you want sandboxes on
+  your tailnet).
 - The GHCR image published (below).
 - For live preview: a **domain you control**, a **wildcard DNS record** `*.<preview-domain>` pointing
   at this host, and a reverse proxy that terminates wildcard TLS (see *Preview subdomains* below).
@@ -50,11 +51,15 @@ Set `PREVIEW_BASE_DOMAIN` (e.g. `preview.example.com`) to the domain you'll serv
 feeds both the worker (the URL it hands the user) and the proxy (Host parsing). Leave it blank to turn
 previews off entirely.
 
-To put every sandbox on your **tailnet**, set `TAILSCALE_API_KEY` (and the `TAILSCALE_TAG` your ACLs
-grant against). The worker mints a reusable, ephemeral, tagged auth key per sandbox and injects it
-at creation; the sandbox redeems it on boot, and again whenever a long pause has cost it its node. This needs two edits to your tailnet policy file first
-(`tagOwners` for the tag, and an `acls` rule granting it) — both are spelled out in `.env.example`.
-Leave `TAILSCALE_API_KEY` blank to skip tailnet joining entirely.
+To put every sandbox on your **tailnet**, set `TAILSCALE_OAUTH_CLIENT_SECRET` (and the `TAILSCALE_TAG`
+your ACLs grant against). The worker injects the secret at sandbox creation and the `tailscale` CLI
+mints itself a single-use, ephemeral, tagged key from it on every login — on boot, and again whenever
+a long pause has cost the sandbox its node. Generate the client at
+[settings/oauth](https://login.tailscale.com/admin/settings/oauth) with the `auth_keys` scope on that
+one tag and nothing else; only the secret is used, not the client ID. This needs two edits to your
+tailnet policy file first (`tagOwners` for the tag, and an `acls` rule granting it) — both are spelled
+out in `.env.example`, along with the trade-off of a non-expiring secret living inside the sandbox.
+Leave `TAILSCALE_OAUTH_CLIENT_SECRET` blank to skip tailnet joining entirely.
 
 Both `.env` and `temporal.toml` are gitignored. If the image is under a different owner/tag than
 `ghcr.io/jasonsteving99/temporal-agents:latest`, edit the `x-image` line in
@@ -290,12 +295,15 @@ docker compose pull && docker compose up -d
 - **The tailnet tag is a grant to agent-written code.** A sandbox on your tailnet reaches whatever
   your ACLs allow `TAILSCALE_TAG`, and what runs in that sandbox is whatever an LLM decided to write
   — including in response to text it read off the internet. Grant the tag the narrowest access that
-  makes it useful, never `autogroup:internet` or blanket subnet access. `TAILSCALE_API_KEY` itself is
-  long-lived and can mint node keys: it stays in the worker's env and is never passed to a sandbox.
-  The per-sandbox key that IS passed in is ephemeral, tagged and expiring precisely because it is
-  readable by the agent (via its own `bash` tool) and recorded in Temporal history. It is *reusable*
-  so a paused session can rejoin the tailnet (`TAILSCALE_KEY_REUSABLE=0` to refuse that trade); every
-  node it can join carries the same tag, so it grants no reach the sandbox didn't already have.
+  makes it useful, never `autogroup:internet` or blanket subnet access.
+- **The OAuth client secret reaches the sandbox, and does not expire.** So that a sandbox can rejoin
+  the tailnet after any pause, however long, it carries the credential that *mints* keys rather than
+  a key — which means `TAILSCALE_OAUTH_CLIENT_SECRET` is readable by the agent (via its own `bash`
+  tool) and recorded in Temporal history, with no expiry to bound the theft window. Rotating the
+  client in the admin console is the only revocation. What it does **not** grant is extra reach: the
+  CLI can only mint keys for tags the client owns, and every node it joins carries the same tag — so
+  a stolen secret buys exactly what the sandbox already had. Scope the client to that one tag, and
+  rotate it on a schedule.
 
 ## Notes & limitations
 

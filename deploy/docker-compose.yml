@@ -50,8 +50,8 @@ services:
     restart: unless-stopped
 
   # The agent worker. Its bash/read/write/edit/grep/glob tools run in E2B's CLOUD (needs E2B_API_KEY),
-  # so no Docker-in-Docker here. Needs GEMINI_API_KEY for the Gemini API, and TAILSCALE_API_KEY if you
-  # want each sandbox on your tailnet.
+  # so no Docker-in-Docker here. Needs GEMINI_API_KEY for the Gemini API, and
+  # TAILSCALE_OAUTH_CLIENT_SECRET if you want each sandbox on your tailnet.
   worker:
     image: *image
     command: ["python", "-m", "examples.sandbox_tools.coding_agent.worker"]

@@ -49,13 +49,14 @@ if [ -x /usr/local/bin/tailscale-up.sh ]; then
   # off the tailnet, and with nothing in the old boot sequence that would ever notice. The user sees
   # the AI gateway (and every other tailnet service) stop answering, mid-session, for no reason.
   #
-  # So: re-run the join script forever. It no-ops while the node is Running, and re-redeems
-  # TAILSCALE_AUTHKEY when it isn't — which is why that key is minted REUSABLE (see tailscale.py).
-  # Backgrounded, output discarded (the script logs to its own file), and never able to fail this
-  # script.
+  # So: re-run the join script forever. It no-ops while the node is Running, and re-authenticates
+  # when it isn't — which is why TAILSCALE_AUTHKEY holds an OAuth client secret rather than a
+  # pre-minted key (see tailscale.py): the CLI mints a fresh one per login, so this can happen any
+  # number of times, days into a session. Backgrounded, output discarded (the script logs to its own
+  # file), and never able to fail this script.
   #
-  # Gated on there being a key to re-redeem: without one there is nothing the watchdog could ever
-  # fix, and tailscale-up.sh would log "not joining a tailnet" every 30 seconds forever.
+  # Gated on there being a credential to re-present: without one there is nothing the watchdog could
+  # ever fix, and tailscale-up.sh would log "not joining a tailnet" every 30 seconds forever.
   if [ -n "${TAILSCALE_AUTHKEY:-}" ] && [ "$TAILSCALE_WATCH_SECONDS" -gt 0 ] 2>/dev/null; then
     log "tailnet watchdog every ${TAILSCALE_WATCH_SECONDS}s"
     (

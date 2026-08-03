@@ -7,12 +7,20 @@
 # an ephemeral node that has been silent long enough, so a session resumed after a long idle comes
 # back holding a node key for a machine the control plane has forgotten. Every pass therefore has to
 # be cheap when there is nothing to do (it returns at the first check while the node is genuinely on
-# the tailnet) and has to be able to re-authenticate from scratch when there is (which is why the key
-# it redeems is minted reusable — see tailscale.py). "Genuinely" is load-bearing: see self_online.
+# the tailnet) and has to be able to re-authenticate from scratch when there is. "Genuinely" is
+# load-bearing: see self_online.
 #
 # Run as this example's E2B `post_create_cmd` (see tools.py's SANDBOX_BACKEND): fired once
 # immediately after sandbox creation, as root, in the background, inheriting the sandbox's env_vars —
-# which is where TAILSCALE_AUTHKEY arrives, minted per sandbox by the worker (tailscale.py).
+# which is where TAILSCALE_AUTHKEY and TAILSCALE_TAG arrive from the worker (tailscale.py).
+#
+# TAILSCALE_AUTHKEY is normally NOT an auth key: it is an OAuth client secret (`tskey-client-...`)
+# with `?preauthorized=true&ephemeral=true` appended, and the `tailscale` CLI mints itself a fresh
+# single-use key from it on every `up`. That is what makes re-authentication above possible at all
+# hours and any number of times — a pre-minted key had to be reusable and unexpired to survive one
+# pause, and eventually ran out of road. It is also why TAILSCALE_TAG is mandatory here: the CLI
+# refuses an OAuth secret with no `--advertise-tags` to stamp the key it mints. A literal auth key
+# still works and skips both (ts_login detects which it has).
 #
 # It CANNOT be the template's start command: that runs while the template builds and is snapshotted
 # into every sandbox, so it starts before any sandbox env exists. post_create_cmd is the only hook
@@ -43,6 +51,13 @@ TS_HOSTNAME="${TAILSCALE_HOSTNAME:-agent-$(echo "${E2B_SANDBOX_ID:-$(hostname)}"
 # subnet route; override if 10.99.99.1 collides with something real on your tailnet.
 TS_DUMMY_IF="${TS_DUMMY_IF:-ts-dummy0}"
 TS_DUMMY_ADDR="${TS_DUMMY_ADDR:-10.99.99.1/32}"
+# How hard to try each `tailscale up`. The OAuth path makes two API round-trips (token exchange, then
+# key creation) BEFORE the login itself, so a single short attempt is a good deal more fragile than
+# it was when the key arrived pre-minted; a transient 5xx from api.tailscale.com used to be
+# impossible and now costs the tailnet until the next watchdog pass. Retries are linear-backoff, the
+# same shape tailscale/github-action settled on for the identical call.
+TS_UP_ATTEMPTS="${TS_UP_ATTEMPTS:-3}"
+TS_UP_TIMEOUT="${TS_UP_TIMEOUT:-45s}"
 
 log() {
   printf '[tailscale-up %s] %s\n' "$(date -u +%H:%M:%S)" "$*" | tee -a "$LOG" >&2
@@ -301,6 +316,39 @@ ts_start_daemon() {
   [ -n "$ready" ] || log "daemon did not answer within 15s; trying anyway"
 }
 
+# Run `tailscale up` with the given flags, retrying with linear backoff. All output to the log.
+ts_up_retry() {
+  local attempt=1
+  while :; do
+    if tailscale --socket="$TS_SOCK" up --timeout="$TS_UP_TIMEOUT" "$@" >>"$LOG" 2>&1; then
+      return 0
+    fi
+    [ "$attempt" -ge "$TS_UP_ATTEMPTS" ] && return 1
+    log "up attempt $attempt/$TS_UP_ATTEMPTS failed; retrying in $((attempt * 2))s"
+    sleep "$((attempt * 2))"
+    attempt=$((attempt + 1))
+  done
+}
+
+# Throw this node's identity away and start over with a brand-new machine key.
+#
+# The last resort, and the one that only became affordable with an OAuth secret in hand. When a node
+# has been deleted from the tailnet, `up --force-reauth` is supposed to re-register it — but if the
+# daemon's saved state is what tailscaled is choking on, no amount of re-auth fixes it, and the old
+# code had nothing left to try. Wiping the state file is the equivalent of the GitHub Action's
+# `tailscaled --state=mem:`, which gets a fresh identity on every single run and never has this class
+# of problem at all. Costs a key (fine — each `up` mints its own now) and the node's 100.x address,
+# which nothing here holds onto.
+ts_reset_identity() {
+  log "discarding saved node state and re-registering from scratch"
+  # The daemon has to go BEFORE the state file: a live tailscaled rewrites it on the way out, so
+  # deleting it first accomplishes nothing. ts_start_daemon clears the socket and re-pkills (a no-op
+  # by then) on its own.
+  pkill -x tailscaled 2>/dev/null && sleep 1
+  rm -f "$TS_STATE" 2>/dev/null || true
+  ts_start_daemon
+}
+
 # Log this node in, from whatever state the daemon is in. $1 non-empty means userspace mode.
 # Returns non-zero when the node did NOT come up, so callers can bail quietly.
 ts_login() {
@@ -309,6 +357,21 @@ ts_login() {
   # MagicDNS points /etc/resolv.conf at 100.100.100.100, which nothing can route without a TUN
   # device — that would break ALL name resolution, not just tailnet names.
   [ -n "$userspace" ] && up_args="$up_args --accept-dns=false"
+
+  # The OAuth path needs a tag to stamp the key it is about to mint, and refuses to mint without one
+  # ("oauth authkeys require --advertise-tags"). A literal auth key carries its tags already, and
+  # passing a mismatched --advertise-tags alongside one is an error — so this flag goes on ONLY for a
+  # client secret, which is exactly what the credential's prefix tells us.
+  case "${TAILSCALE_AUTHKEY:-}" in
+    tskey-client-*)
+      if [ -z "${TAILSCALE_TAG:-}" ]; then
+        log "TAILSCALE_AUTHKEY is an OAuth client secret but TAILSCALE_TAG is unset;" \
+            "the CLI cannot mint a key without a tag — continuing without the tailnet"
+        return 1
+      fi
+      up_args="$up_args --advertise-tags=$TAILSCALE_TAG"
+      ;;
+  esac
 
   # Which `up` to run comes from the DAEMON's state, never from whether the state file exists:
   # tailscaled writes that file (its machine key) as soon as it starts, before any login. A bare
@@ -320,37 +383,69 @@ ts_login() {
 
   # shellcheck disable=SC2086  # $up_args is a flag list; word splitting is the point
   if [ "$state" = "Stopped" ]; then
-    if tailscale --socket="$TS_SOCK" up --timeout=30s $up_args >>"$LOG" 2>&1; then
+    # One attempt, not $TS_UP_ATTEMPTS: this is the cheap "maybe the saved identity still works"
+    # probe, and the authenticated path below is the real one. Retrying a dead identity three times
+    # just delays the fix.
+    if tailscale --socket="$TS_SOCK" up --timeout="$TS_UP_TIMEOUT" $up_args >>"$LOG" 2>&1; then
       log "up with saved node state"
       return 0
     fi
-    log "saved node state would not come up; falling back to the auth key"
+    log "saved node state would not come up; falling back to the credential"
   fi
 
   if [ -n "${TAILSCALE_AUTHKEY:-}" ]; then
     # --force-reauth, because the interesting case is a node whose IDENTITY is gone: Tailscale
     # removed this sandbox's ephemeral node while it was paused, so tailscaled still holds a node
     # key the control plane no longer knows. A plain `up --authkey` can decide it is already
-    # configured and do nothing at all with the key; forcing reauth makes it actually redeem it and
+    # configured and do nothing at all with the credential; forcing reauth makes it actually go and
     # register again. Harmless on a first boot, where there is no identity to replace.
-    if tailscale --socket="$TS_SOCK" up --authkey="$TAILSCALE_AUTHKEY" --force-reauth \
-      --timeout=30s $up_args >>"$LOG" 2>&1; then
-      log "up with the auth key minted for this sandbox"
+    #
+    # Where THIS attempt's output starts in the log, so the classification below reads only what
+    # just happened. The log accumulates for the whole session (the watchdog re-runs this script
+    # every 30s), and several of the phrases matched below appear in messages this script itself
+    # writes — so a line-count tail would eventually match its own previous verdict and get stuck on
+    # it forever. Byte offset is exact and has no such feedback loop.
+    local mark
+    mark=$(wc -c <"$LOG" 2>/dev/null || echo 0)
+
+    # shellcheck disable=SC2086
+    if ts_up_retry --authkey="$TAILSCALE_AUTHKEY" --force-reauth $up_args; then
+      log "up with a key minted for this sandbox"
       return 0
     fi
-    # Only the TAIL of the log: it accumulates for the whole session now that the watchdog re-runs
-    # this script, so an old failure from boot must not be read as this attempt's reason.
-    if tail -n 50 "$LOG" 2>/dev/null | grep -q "fetch control key"; then
+
+    local recent
+    recent=$(tail -c "+$((mark + 1))" "$LOG" 2>/dev/null)
+    if printf '%s' "$recent" | grep -q "fetch control key"; then
+      # Nothing local can fix this and re-registering would not help, so don't burn the reset on it.
       log "cannot reach controlplane.tailscale.com from this sandbox (egress blocked?);" \
-          "the auth key was never presented — continuing without the tailnet"
-    else
-      log "login failed; the key may have expired, or be single-use and already redeemed" \
-          "(TAILSCALE_KEY_REUSABLE=0) — see $LOG. Continuing without the tailnet"
+          "the credential was never presented — continuing without the tailnet"
+      return 1
     fi
+    if printf '%s' "$recent" | grep -qE "oauth2:|invalid_client|enough permissions|requested tags"; then
+      # A rejected credential is a configuration problem — wrong secret, or an OAuth client that
+      # doesn't own TAILSCALE_TAG (the API says "does not have enough permissions to use tag"). The
+      # same rejected secret would fail a fresh registration identically, so say what to look at
+      # instead of burning the reset below.
+      log "the tailnet credential was rejected; check TAILSCALE_OAUTH_CLIENT_SECRET and that its" \
+          "OAuth client owns ${TAILSCALE_TAG:-the tag} — see $LOG. Continuing without the tailnet"
+      return 1
+    fi
+
+    # Everything else: the daemon has a saved identity it cannot make work. Throw it away and try
+    # once more from nothing. This is the path the old code had no answer for.
+    ts_reset_identity
+    # shellcheck disable=SC2086
+    if ts_up_retry --authkey="$TAILSCALE_AUTHKEY" $up_args; then
+      log "up as a brand-new node after discarding saved state"
+      return 0
+    fi
+    log "could not join the tailnet even from a clean state — see $LOG." \
+        "Continuing without the tailnet"
     return 1
   fi
 
-  log "no identity and no auth key; continuing without the tailnet"
+  log "no identity and no credential; continuing without the tailnet"
   return 1
 }
 
