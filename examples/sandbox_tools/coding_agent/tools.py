@@ -55,11 +55,9 @@ SANDBOX_ID_ENV_VAR = "E2B_SANDBOX_ID"
 AI_GATEWAY_URL = os.environ.get("AI_GATEWAY_URL", "").strip().rstrip("/")
 
 # Models the gateway serves, best-first. The agent picks per task: the first for real work, the last
-# when it wants cheap and fast. Mixed-provider by design — the gateway fronts both an OpenAI-style
-# `/v1` endpoint and the Gemini API, and workflow.py derives the right client library for each model
-# from its id (see _is_openai_model there), so a model can be added or reordered here alone.
+# when it wants cheap and fast.
 AI_GATEWAY_MODELS = os.environ.get(
-    "AI_GATEWAY_MODELS", "gpt-5.6-luna, gemini-3.6-flash, gemini-3.5-flash-lite"
+    "AI_GATEWAY_MODELS", "gemini-3.6-flash, gemini-3.5-flash-lite"
 ).strip()
 
 # The template's IDENTITY: the fields the image is built from. Everything that must agree between

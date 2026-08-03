@@ -5,7 +5,7 @@
 # config (Temporal connection, large-payload settings) lives in .env so it isn't repeated here.
 #
 # Setup + run: see ./README.md. TL;DR:
-#   cp .env.example .env                       # fill OPENAI_API_KEY, E2B_API_KEY
+#   cp .env.example .env                       # fill GEMINI_API_KEY, E2B_API_KEY
 #   cp temporal.cloud.toml.example temporal.toml   # fill Temporal Cloud address/namespace/api_key
 #   docker compose --profile setup run --rm build-sandbox   # once: build the E2B template
 #   docker compose up -d
@@ -50,7 +50,7 @@ services:
     restart: unless-stopped
 
   # The agent worker. Its bash/read/write/edit/grep/glob tools run in E2B's CLOUD (needs E2B_API_KEY),
-  # so no Docker-in-Docker here. Needs OPENAI_API_KEY for the OpenAI API, and
+  # so no Docker-in-Docker here. Needs GEMINI_API_KEY for the Gemini API, and
   # TAILSCALE_OAUTH_CLIENT_SECRET if you want each sandbox on your tailnet.
   worker:
     image: *image

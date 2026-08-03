@@ -1,6 +1,6 @@
 # Sandboxed coding agent
 
-A real OpenAI **coding agent** whose tools run **inside an isolated E2B cloud sandbox** — never
+A real Gemini **coding agent** whose tools run **inside an isolated Daytona cloud sandbox** — never
 on the worker's or the user's machine. Ask it to build an app, add a feature, run tests, or explain
 code, and an LLM reasons and calls `bash` / `read` / `write` / `edit` / `grep` / `glob` to do it,
 all against a project that lives in the box.
@@ -20,39 +20,15 @@ The two coding agents duplicate almost nothing — the common pieces live in
 | --- | --- |
 | `tool_impls.py` | The pure `(root, args) → result` implementations (`bash_exec`/`read_file`/`edit_file`/…). Both agents call these; this agent bakes it into its snapshot image. |
 | `todo_tools.py` | `todowrite`/`todoread` — inline workflow tools for the agent's task list. |
+| `chat_loop.py` | The Gemini Interactions streaming tool-calling loop. |
 
 This example only supplies what genuinely differs: the tools declared as
 `@agent.activity_tool_defn(sandboxed=True)` **`BaseModel`-in/out** tools (`tools.py`), the workflow
 config (`sandbox=SANDBOX`), the worker, and the snapshot image.
 
-## The model: OpenAI Agents SDK
-
-The agent is driven by the **OpenAI Agents SDK** through the harness's vendored `OpenAIAgentsPlugin`,
-not by a hand-rolled loop. `ask()` builds an `agents.Agent` and drives one turn with
-`Runner.run_streamed(...)`; the SDK owns the model→tool-call→result→model cycle, so the Gemini-era
-`coding_agent_common/chat_loop.py` is gone.
-
-Three seams make that SDK loop a *harness* loop rather than a plain one:
-
-- **Tools.** Each harness tool is adapted with `as_openai_agent_tool(self._runner, tool)`, which
-  routes every model tool call back through `runner.run_tool(...)`. That is what keeps the approval
-  policy, the `tool_start`/`tool_end`/`tool_error` events, and — for the six sandboxed tools — the
-  durable in-sandbox activity dispatch. The `Injected[...]` params (`todowrite`/`todoread`'s `sink`)
-  stay hidden from the model's schema and are supplied per call via `injections=`.
-- **Streaming.** `worker.py` wires `stream_to_provider` + `harness_observer_factory` onto the plugin,
-  and the workflow passes `context=self._runner` to `run_streamed`. Together those route raw OpenAI
-  Responses events onto this turn's stream as `reply_delta` / `thought_summary` / `tool_requested`,
-  which is what the UI renders live. Drop either and the UI goes quiet until the turn ends.
-- **Conversation state.** There is no `previous_interaction_id` equivalent: the transcript is carried
-  in workflow state as the SDK's input-item list (`result.to_input_list()`), so it is durable and
-  survives replay without the provider having to still hold the prior interaction.
-
-`MAX_MODEL_TURNS` is raised well above the SDK's default of 10 — a coding agent passes 10 model calls
-in the middle of an ordinary task, and the default would end the turn with `MaxTurnsExceeded`.
-
 ## Requirements
 
-- `OPENAI_API_KEY` — the agent calls the OpenAI API through the harness's OpenAI Agents plugin.
+- `GEMINI_API_KEY` — the agent calls the Gemini Interactions API.
 - `E2B_API_KEY` — the tools run in a real E2B cloud sandbox, and `just build-sandbox` builds its template.
 - `DAYTONA_API_KEY` / `DAYTONA_TARGET` *(optional)* — only for the Daytona backend and its preview proxy.
 - `TAILSCALE_OAUTH_CLIENT_SECRET` *(optional)* — puts each sandbox on your tailnet (see
@@ -222,30 +198,21 @@ Further caveats:
 
 Set `AI_GATEWAY_URL` (e.g. `http://llm`, a Tailscale Aperture node on your tailnet) and the agent is
 told it can build AI features against it. Authorization is the sandbox's **tailnet identity**, so no
-key exists or is needed — the client is pointed at the gateway with a placeholder `api_key` the
-library insists on and the gateway ignores.
-
-The gateway fronts **two APIs**, so the instruction pairs a library with each model: `gpt-*` models
-go through `openai` at `<gateway>/v1`, `gemini-*` models through `google-genai` at the gateway root.
+key exists or is needed — `google-genai` is pointed at the gateway with a placeholder `api_key` the
+library insists on and the gateway ignores:
 
 ```python
-from openai import OpenAI
+from google import genai
 
-client = OpenAI(api_key="unused", base_url="http://llm/v1")
-resp = client.responses.create(model="gpt-5.6-luna", input="...")
-print(resp.output_text)
+client = genai.Client(api_key="unused", http_options={"base_url": "http://llm"})
+resp = client.models.generate_content(model="gemini-3.6-flash", contents="...")
+print(resp.text)
 ```
 
-`api_key="unused"` is not decorative: both libraries refuse to construct a client without one, and
-the gateway ignores it. The instruction also gives the async form and how to pass a system prompt for
-each library, because those are the two things a model reaches for next and would otherwise debug
-against a gateway that gives no hints.
-
-Neither snippet is typed into the prompt. `workflow.py` classifies each entry in `AI_GATEWAY_MODELS`
-by its id (`_is_openai_model`) and generates one worked example per family actually present — so a
-gateway serving only Gemini never shows the agent the `openai` library, and adding or reordering a
-model is a pure config change. This is the same rule the preview URL follows, and for the same
-reason: a model id hardcoded into the prompt outlives the config change that invalidated it.
+`api_key="unused"` is not decorative: the library refuses to construct a client without one, and the
+gateway ignores it. The instruction also gives the async form (`client.aio.models.generate_content`)
+and how to pass a system prompt, because those are the two things a model reaches for next and would
+otherwise debug against a gateway that gives no hints.
 
 Two things the instruction is emphatic about, because both are easy to get wrong:
 
@@ -253,11 +220,10 @@ Two things the instruction is emphatic about, because both are easy to get wrong
   browser did not. A client-side `fetch()` from a previewed page fails for everyone but the sandbox,
   so the app must expose its own endpoint that calls the gateway.
 - **Never ask the user for a key.** There isn't one, and a model asked to "add AI" will otherwise
-  reach for an API key out of habit.
+  reach for `GEMINI_API_KEY` out of habit.
 
 Leave `AI_GATEWAY_URL` blank and the agent is never told the gateway exists. `AI_GATEWAY_MODELS`
-(default `gpt-5.6-luna, gemini-3.6-flash, gemini-3.5-flash-lite`) is the list it picks from, best
-first — the agent defaults to the first entry.
+(default `gemini-3.6-flash, gemini-3.5-flash-lite`) is the list it picks from, best first.
 
 ## Approvals
 
@@ -270,17 +236,17 @@ resolved via `POST /api/approve`).
 ## Run
 
 ```bash
-just build-sandbox      # once — builds the E2B template (needs E2B_API_KEY)
+just build-sandbox      # once — builds the Daytona snapshot (needs DAYTONA_API_KEY)
 just temporal           # 1. local Temporal dev server
 just session-manager    # 2. shared session-manager worker
 just server             # 3. FastAPI API + UI on :8000
-just worker             # 4. this example's agent worker (needs OPENAI_API_KEY + E2B_API_KEY)
+just worker             # 4. this example's agent worker (needs GEMINI_API_KEY + DAYTONA_API_KEY)
 just preview-proxy      # 5. (optional) live-preview proxy on :8080
 ```
 
 Open `http://localhost:8000`, pick "Sandboxed Coding Agent", and chat — e.g. *"build a hello-world
 site and serve it on port 3000"*. Approve the `bash`/`write` calls; the agent scaffolds the project
-in `/home/user/project`, and (for a web app) writes the launch command to `start.sh` in the
+in `/home/daytona/project`, and (for a web app) writes the launch command to `start.sh` in the
 project dir and gives you a preview URL.
 
 ## Live preview

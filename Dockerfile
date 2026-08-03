@@ -3,7 +3,7 @@
 # overrides `command`. Built + pushed to GHCR by .github/workflows/build-image.yml.
 #
 # The tools run in Daytona's CLOUD (not in this container), so there is no Docker-in-Docker here —
-# the worker only needs E2B_API_KEY at runtime.
+# the worker only needs DAYTONA_API_KEY at runtime.
 FROM ghcr.io/astral-sh/uv:python3.12-trixie-slim
 
 ENV UV_LINK_MODE=copy \

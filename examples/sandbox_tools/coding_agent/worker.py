@@ -5,22 +5,14 @@ Run from the repo root with:
 
 Hosts SandboxedCodingAgentWorkflow plus its sandbox lifecycle activities (and the Tailscale backend
 provider they resolve this agent's `SandboxConfig.backend` name against) and
-its six sandboxed tools' activities (bash/read/write/edit/grep/glob). The OpenAI Agents plugin is
-registered because the agent drives the OpenAI Agents SDK; the plugin auto-registers its model
-activities (including the streaming one). Run `just build-sandbox` once before starting this worker —
-runtime never builds the sandbox image implicitly (SandboxConfig.require_prebuilt).
-
-The plugin is wired for the HARNESS STREAMING PATH:
-  * `model_params.stream_to_provider=stream_to_provider` — resolves each streamed model call's
-    per-turn stream context off the runner the workflow passes as `Runner.run_streamed(context=...)`,
-    and
-  * `observer_factory=harness_observer_factory` — turns that context into the observer that
-    translates raw OpenAI events into the harness turn-stream vocabulary live.
-Drop either one and the UI stops seeing token-by-token replies, thought summaries and tool requests.
+its six sandboxed tools' activities (bash/read/write/edit/grep/glob). The Gemini plugin is
+registered because the agent drives the Gemini Interactions API; the plugin auto-registers its
+interactions activity. Run `just build-sandbox` once before starting this worker — runtime never
+builds the sandbox image implicitly (SandboxConfig.require_prebuilt).
 
 Env vars (set in .env.local — see .env.example):
     TEMPORAL_CONFIG_FILE / TEMPORAL_PROFILE   Temporal connection profile
-    OPENAI_API_KEY                            required — the agent calls the OpenAI API
+    GEMINI_API_KEY                            required — the agent calls the Gemini API
     E2B_API_KEY                               required — the tools run on an E2B sandbox
     SANDBOXED_CODING_AGENT_TASK_QUEUE         task queue to poll (default: sandboxed-coding-agent)
     TAILSCALE_OAUTH_CLIENT_SECRET             optional — lets each sandbox mint its own tailnet key;
@@ -33,20 +25,14 @@ import asyncio
 import logging
 import os
 import sys
-from datetime import timedelta
 
+from google.genai import Client as GeminiClient
 from temporalio.client import Client
+from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.envconfig import ClientConfig
 from temporalio.worker import Worker
 
-from temporal_agent_harness.ai_sdks.openai_agents import (
-    ModelActivityParameters,
-    OpenAIAgentsPlugin,
-)
-from temporal_agent_harness.ai_sdks.openai_agents_harness import (
-    harness_observer_factory,
-    stream_to_provider,
-)
+from temporal_agent_harness.ai_sdks.google_genai_plugin import GoogleGenAIPlugin
 from temporal_agent_harness.harness import agent
 from temporal_agent_harness.harness.sandbox.activities import sandbox_activities
 
@@ -64,29 +50,17 @@ async def main() -> None:
 
     task_queue = os.environ.get("SANDBOXED_CODING_AGENT_TASK_QUEUE", TASK_QUEUE)
 
-    # The SDK reads OPENAI_API_KEY itself, inside the model activity; check it here so a missing key
-    # fails at startup rather than mid-turn.
-    if not os.environ.get("OPENAI_API_KEY"):
-        sys.exit("error: OPENAI_API_KEY env var not set")
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        sys.exit("error: GEMINI_API_KEY env var not set")
+    plugin = GoogleGenAIPlugin(GeminiClient(api_key=api_key))
 
-    plugin = OpenAIAgentsPlugin(
-        model_params=ModelActivityParameters(
-            # A coding agent's model calls can be long (big transcripts, long tool schemas), so this
-            # matches the 3 minutes the Gemini interactions activity was given. Streaming leans on
-            # activity heartbeats to notice a stuck call, so keep the heartbeat well under it.
-            start_to_close_timeout=timedelta(minutes=3),
-            heartbeat_timeout=timedelta(seconds=30),
-            # The harness streaming seam: route streamed events to the in-flight turn.
-            stream_to_provider=stream_to_provider,
-        ),
-        observer_factory=harness_observer_factory,
-    )
-
-    # No `data_converter=` here: the plugin installs its own, which is OpenAI-aware AND
-    # pydantic-compatible — it supersedes the `pydantic_data_converter` the Gemini worker passed
-    # (the sandboxed tools' BaseModel inputs/results still round-trip).
     connect_config = ClientConfig.load_client_connect_config()
-    client = await Client.connect(**connect_config, plugins=[plugin])
+    client = await Client.connect(
+        **connect_config,
+        plugins=[plugin],
+        data_converter=pydantic_data_converter,
+    )
 
     worker = Worker(
         client,
@@ -97,8 +71,8 @@ async def main() -> None:
         # auth key. The factory form is used instead of the ready-made SANDBOX_ACTIVITIES precisely
         # because there's a provider to inject; register one or the other, never both (the three
         # activity names can be claimed only once per worker).
-        # One tool_activity per sandboxed tool: each tool's durable body. The OpenAI model
-        # activities (incl. invoke_model_activity_streaming) are registered by the plugin.
+        # One tool_activity per sandboxed tool: each tool's durable body. The Gemini interactions
+        # activity is registered by the plugin.
         activities=[
             *sandbox_activities({PROVIDER_NAME: e2b_with_tailscale}),
             *(agent.tool_activity(tool) for tool in SANDBOXED_CODING_TOOLS),
