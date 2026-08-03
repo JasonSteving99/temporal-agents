@@ -92,8 +92,17 @@ class Registry:
         return self._apps.get(key)
 
     def list(self) -> "list[dict]":
-        """Newest-first, as the gallery shows them."""
-        return sorted(self._apps.values(), key=lambda a: a.get("last_seen", 0), reverse=True)
+        """Pinned first, then newest-first — the order the gallery shows them in.
+
+        Pinning is the one piece of ordering a human controls. Everything else is
+        recency, which is right for a gallery that fills itself but wrong for the
+        two or three sites you keep coming back to.
+        """
+        return sorted(
+            self._apps.values(),
+            key=lambda a: (bool(a.get("pinned")), a.get("last_seen", 0)),
+            reverse=True,
+        )
 
     def __contains__(self, key: str) -> bool:
         return key in self._apps
@@ -118,7 +127,9 @@ class Registry:
                 "key": key,
                 "sandbox_id": sandbox_id,
                 "port": port,
-                "title": "",
+                "title": "",      # read off the page itself when we screenshot it
+                "label": "",      # what a human called it; wins over title in the UI
+                "pinned": False,
                 "first_seen": now,
                 "last_seen": now,
                 "shot_at": 0,
@@ -141,6 +152,27 @@ class Registry:
                 app["title"] = title[:120]
             self._dirty = True
             self.flush(force=True)
+
+    async def set_label(self, key: str, label: str) -> bool:
+        """Name one app by hand. An empty label falls back to the page's own title."""
+        async with self._lock:
+            app = self._apps.get(key)
+            if app is None:
+                return False
+            app["label"] = label.strip()[:80]
+            self._dirty = True
+            self.flush(force=True)
+            return True
+
+    async def set_pinned(self, key: str, pinned: bool) -> bool:
+        async with self._lock:
+            app = self._apps.get(key)
+            if app is None:
+                return False
+            app["pinned"] = pinned
+            self._dirty = True
+            self.flush(force=True)
+            return True
 
     async def forget(self, key: str) -> bool:
         async with self._lock:

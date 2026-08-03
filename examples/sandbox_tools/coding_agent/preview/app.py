@@ -51,6 +51,9 @@ def build_app() -> web.Application:
     app.router.add_get("/__apps/manifest.webmanifest", pwa.manifest)
     app.router.add_get("/__apps/sw.js", pwa.service_worker)
     app.router.add_get("/__apps/static/{name}", pwa.static_asset)
+    # Optional landing-page clips. Public for the same reason the icons are: they
+    # are marketing, shown to people who have not signed in yet.
+    app.router.add_get("/__apps/media/{name}", pwa.media_asset)
 
     # Gallery routes (home.py). Same dunder-prefix reasoning as /__auth/*. NOTE
     # the gallery page itself is deliberately NOT registered here: it hangs off
@@ -58,6 +61,8 @@ def build_app() -> web.Application:
     # previewed site. proxy.index() dispatches it instead.
     app.router.add_get("/__apps/shot/{key}", home.app_shot)
     app.router.add_post("/__apps/refresh", home.app_refresh)
+    app.router.add_post("/__apps/label", home.app_label)
+    app.router.add_post("/__apps/pin", home.app_pin)
     app.router.add_post("/__apps/forget", home.app_forget)
 
     # Catch-all: Host decides the sandbox, the path is forwarded verbatim.

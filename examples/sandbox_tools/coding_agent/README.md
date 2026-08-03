@@ -281,6 +281,51 @@ a normal site — it's served at the root of its own subdomain, so absolute asse
 it needs a wildcard DNS record + a reverse proxy for wildcard TLS; see
 [`deploy/README.md`](../../../deploy/README.md).
 
+### The two front doors
+
+`https://<PREVIEW_BASE_DOMAIN>/` serves one of two pages depending on who is asking, and
+[`theme.py`](preview/theme.py) is the design system both are built from.
+
+- **Signed out** you get the landing page ([`landing.py`](preview/landing.py)) — what a preview is,
+  the three states a sandbox can be in, what signing in actually gets you, and the role table. It
+  used to be an immediate bounce to a sign-in card that explained nothing, which stranded two kinds
+  of visitor: someone handed a preview link who had no idea what they were being given, and someone
+  not on the allowlist who had no way to know that being *added* was the missing step.
+- **Signed in** you get the gallery ([`pages.py`](preview/pages.py)), with client-side search, sort,
+  grouping by sandbox and a compact density — none of which costs a request. The three controls that
+  change shared state are admin-only, because one registry is shared by everyone who signs in:
+  **rename** (`POST /__apps/label`, since sites arrive named whatever `<title>` the agent wrote),
+  **pin** (`POST /__apps/pin`, the only ordering a human controls), and **forget**.
+
+Card state is **inferred, not observed**: a site visited within `PREVIEW_AUTO_STOP_MINUTES` is
+labelled `awake`, anything older `asleep`. That is right almost always and wrong in one case worth
+knowing — a sandbox the agent is actively working in gets no preview traffic, so it reads as asleep
+while it is very much running. Asking E2B per tile would be an API call per card on every load.
+
+Colour carries that state everywhere: **amber means running** (and therefore billing), **cold blue
+means suspended with its memory intact**, grey means the session ended. It is the inversion of the
+usual convention and it is deliberate — the thing that costs money is the thing that glows.
+
+#### Landing-page demo clips
+
+The landing page's two visuals are hand-built CSS by default: a dashboard that frosts over and thaws
+as its pill flips `live → suspended → resuming`, and a mock gallery grid. Both are **media slots** —
+drop a file into `preview/static/media/` and it is used instead, from the next page load, no restart:
+
+| File | Replaces | Good length |
+| --- | --- | --- |
+| `hero.webm` / `hero.mp4` | the wake sequence in the browser frame | 6–12s |
+| `gallery.webm` / `gallery.mp4` | the mock grid in the "every site" card | 4–8s |
+
+`.png` / `.jpg` / `.gif` work too. Videos are rendered muted, looping and `playsinline` with no
+controls, so record accordingly: **no cursor chrome, no audio, and a loop that starts and ends on
+the same frame.** For `hero`, the shot worth having is a real one of this system — open a suspended
+preview and let the page paint. Record at 16:9 or wider and at least 1280px; the frame is
+`object-fit: cover`, so anything taller is cropped from the bottom.
+
+The CSS mocks are the default on purpose: they can never go out of date, they weigh nothing, and
+they hold still under `prefers-reduced-motion`. Adding clips is an upgrade, not a fix.
+
 ### Cost: idle sandboxes stop themselves
 
 Resuming a sandbox on a preview hit would otherwise leave it billing compute forever. E2B has no

@@ -29,6 +29,21 @@ from aiohttp import web
 
 STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
+# Optional demo clips for the landing page. Nothing ships here — drop a file in
+# and the landing page uses it instead of its CSS mock; leave it empty and the
+# page is exactly as complete. See the README, "Landing-page demo clips".
+MEDIA_DIR = os.path.join(STATIC_DIR, "media")
+
+# Order is preference: a browser gets the first format it can play, so webm
+# (smaller) is offered ahead of mp4 (universal), and a still image is the floor.
+MEDIA_TYPES = {
+    ".webm": "video/webm",
+    ".mp4": "video/mp4",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".gif": "image/gif",
+}
+
 ICONS = {
     "icon-192.png": "image/png",
     "icon-512.png": "image/png",
@@ -106,22 +121,32 @@ self.addEventListener("fetch", (e) => {
 """
 
 
-def _build_id() -> str:
+_BUILD_ID: "str | None" = None
+
+
+def build_id() -> str:
     """Changes whenever the shipped app changes, so the browser sees a new worker.
 
     A byte-identical service worker is treated as "no update" by the browser, so
-    the cache name has to move with the code. Hashing the pages themselves means a
-    redeploy that changed nothing doesn't needlessly evict everyone's screenshots.
+    the cache name has to move with the code. Hashing the shipped markup and the
+    shared stylesheet means a redeploy that changed nothing doesn't needlessly
+    evict everyone's screenshots — and, since theme.py is in the hash, a
+    colour-only change still reaches installed apps.
+
+    Computed on first use rather than at import: landing.py imports this module,
+    so hashing it from module scope here would be a cycle.
     """
-    from .pages import ADMIN_PAGE, HOME_PAGE
+    global _BUILD_ID
+    if _BUILD_ID is None:
+        from .landing import _CSS, _TEMPLATE
+        from .pages import ADMIN_PAGE, HOME_PAGE
+        from .theme import BASE_CSS
 
-    h = hashlib.sha256()
-    for part in (HOME_PAGE, ADMIN_PAGE, SERVICE_WORKER):
-        h.update(part.encode())
-    return h.hexdigest()[:12]
-
-
-BUILD_ID = _build_id()
+        h = hashlib.sha256()
+        for part in (HOME_PAGE, ADMIN_PAGE, _TEMPLATE, _CSS, BASE_CSS, SERVICE_WORKER):
+            h.update(part.encode())
+        _BUILD_ID = h.hexdigest()[:12]
+    return _BUILD_ID
 
 
 async def manifest(request: web.Request) -> web.Response:
@@ -156,7 +181,7 @@ async def manifest(request: web.Request) -> web.Response:
 
 async def service_worker(request: web.Request) -> web.Response:
     return web.Response(
-        text=SERVICE_WORKER.replace("__BUILD__", BUILD_ID),
+        text=SERVICE_WORKER.replace("__BUILD__", build_id()),
         content_type="application/javascript",
         headers={
             # Widen the worker's scope beyond its own directory. Without this the
@@ -165,6 +190,54 @@ async def service_worker(request: web.Request) -> web.Response:
             # The worker is how updates arrive, so it must never be served stale.
             "Cache-Control": "no-cache",
         },
+    )
+
+
+def media_tag(slot: str, fallback: str) -> str:
+    """Markup for one landing-page visual: a real recording if one exists, else `fallback`.
+
+    Looked up per render rather than at import, so dropping `hero.mp4` into
+    `static/media/` takes effect on the next page load instead of the next
+    restart. The directory is normally absent and this simply returns `fallback`.
+
+    Videos are muted, looping and inline — the three attributes that let a clip
+    autoplay on iOS at all — and carry no controls, because the slot is an
+    illustration, not something to operate.
+    """
+    found = [
+        (ext, mime) for ext, mime in MEDIA_TYPES.items()
+        if os.path.isfile(os.path.join(MEDIA_DIR, slot + ext))
+    ]
+    if not found:
+        return fallback
+    videos = [(e, m) for e, m in found if m.startswith("video/")]
+    if videos:
+        sources = "".join(
+            f'<source src="/__apps/media/{slot}{ext}" type="{mime}">' for ext, mime in videos
+        )
+        return (
+            '<video autoplay muted loop playsinline preload="metadata" '
+            f'aria-hidden="true">{sources}</video>'
+        )
+    ext = found[0][0]
+    return f'<img src="/__apps/media/{slot}{ext}" alt="">'
+
+
+async def media_asset(request: web.Request) -> web.Response:
+    """Serve one landing-page clip. Public, like the icons — it's marketing."""
+    name = request.match_info.get("name", "")
+    stem, ext = os.path.splitext(name)
+    content_type = MEDIA_TYPES.get(ext.lower())
+    # Allowlist both halves: the extension by type, the stem by shape. Neither can
+    # contain a separator, so the join below cannot escape MEDIA_DIR.
+    if content_type is None or not stem.replace("-", "").replace("_", "").isalnum():
+        return web.Response(status=404, text="Not found")
+    path = os.path.join(MEDIA_DIR, name)
+    if not os.path.isfile(path):
+        return web.Response(status=404, text="Not found")
+    return web.FileResponse(
+        path,
+        headers={"Content-Type": content_type, "Cache-Control": "public, max-age=86400"},
     )
 
 

@@ -29,7 +29,7 @@ noting about how it responds to everyone else:
 
 import html
 import json
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from aiohttp import ClientSession, web
 
@@ -45,7 +45,7 @@ from .config import (
     PREVIEW_BASE_DOMAIN,
     SESSION_TTL,
 )
-from .pages import ADMIN_PAGE, LOGIN_PAGE
+from .pages import ADMIN_PAGE, LOGIN_DEST, LOGIN_PAGE
 from .pwa import head_tags
 from .session import is_admin, is_authed, make_session, request_email, safe_next
 
@@ -70,9 +70,26 @@ async def login_page(request: web.Request) -> web.Response:
     body = (
         LOGIN_PAGE.replace("__CONFIG__", json.dumps(config))
         .replace("__NEXT__", json.dumps(nxt))
+        .replace("__DEST__", _dest_chip(nxt))
         .replace("__PWA_HEAD__", head_tags())
     )
     return web.Response(content_type="text/html", text=body)
+
+
+def _dest_chip(nxt: str) -> str:
+    """The "opening <host>" chip, or nothing.
+
+    Someone who followed a preview link is about to sign in for a reason, and the
+    reason is a specific site — showing it is the difference between a credential
+    prompt and a door with a label on it. Landing back on the gallery is the
+    default and says nothing, because there is nothing to say.
+    """
+    host = (urlsplit(nxt).hostname or "").lower()
+    if not host or host == AUTH_HOST:
+        return ""
+    # safe_next has already clamped this to our own domain; escape anyway, because
+    # "the value is already safe" is exactly how that stops being true.
+    return LOGIN_DEST.replace("__HOST__", html.escape(host))
 
 
 async def verify_id_token(session: ClientSession, id_token: str) -> "str | None":

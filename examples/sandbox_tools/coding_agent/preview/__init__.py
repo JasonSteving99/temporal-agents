@@ -52,11 +52,18 @@ THE MAP — modules bottom-up, each importing only the ones above it:
                    is_admin predicates every request is checked against.
     screenshots.py Headless-browser capture, taken only while a sandbox is
                    already awake — the reason the gallery is images, not iframes.
-    pages.py       The three HTML pages (sign-in, admin panel, gallery). Markup only.
+    theme.py       The design system: tokens, type, buttons, state pills. Every
+                   page below draws on it, so colour and control changes are made
+                   once. Read its docstring for what the palette MEANS.
+    pwa.py         Manifest, service worker, icons and the optional landing-page
+                   clips — what makes the gallery an installable, always-fresh
+                   mobile app.
+    pages.py       The signed-in markup: sign-in, gallery, admin panel, dead ends.
+    landing.py     The signed-OUT markup: what this is and what signing in gets
+                   you, for someone who has never seen it before.
     auth.py        HTTP handlers for signing in and for editing the guest list.
-    home.py        The gallery and its routes.
-    pwa.py         Manifest, service worker and icons that make the gallery an
-                   installable, always-fresh mobile app.
+    home.py        The root of the login host — gallery when signed in, landing
+                   page when not — and the routes that organise the gallery.
     proxy.py       The actual proxying: wake the sandbox, wait for its server,
                    forward the request. Plus the Caddy cert-issuance check.
     app.py         Route table + lifecycle. The order routes are added in is

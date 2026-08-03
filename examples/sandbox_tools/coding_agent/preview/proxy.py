@@ -23,7 +23,7 @@ from .config import (
     PREVIEW_BASE_DOMAIN,
     SANDBOX_TIMEOUT_SECONDS,
 )
-from .pages import DENIED_PAGE
+from .pages import DENIED_PAGE, HELP_PAGE
 from .registry import app_key, registry
 from .screenshots import schedule_capture
 from .session import can_use_agent, is_authed, redirect_to_login
@@ -511,10 +511,5 @@ async def index(request: web.Request):
     base = PREVIEW_BASE_DOMAIN or "&lt;PREVIEW_BASE_DOMAIN unset&gt;"
     return web.Response(
         content_type="text/html",
-        text=(
-            "<h1>Sandbox preview proxy</h1>"
-            f"<p>Open <code>https://&lt;sandboxId&gt;-&lt;port&gt;.{base}/</code>. The chat "
-            "agent prints the full URL after it builds a site — it reads the id from "
-            "<code>$E2B_SANDBOX_ID</code> inside the sandbox.</p>"
-        ),
+        text=HELP_PAGE.replace("__BASE__", base),
     )

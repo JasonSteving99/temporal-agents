@@ -1,11 +1,17 @@
 """
-The landing page: a gallery of every preview site the proxy has ever served,
-plus the routes that back it.
+The root of the login host, and the routes that back it.
 
-    GET  /              (on the login host)  the gallery itself
+    GET  /              (on the login host)  the gallery — or, signed out,
+                                             the landing page (landing.py)
     GET  /__apps/shot/{key}                  one screenshot
     POST /__apps/refresh                     re-screenshot one app
-    POST /__apps/forget                      drop one app from the gallery
+    POST /__apps/label                       rename one app          (admin)
+    POST /__apps/pin                         pin/unpin one app       (admin)
+    POST /__apps/forget                      drop one app            (admin)
+
+Signed in, "/" is a gallery of every preview site the proxy has ever served.
+Signed out it is a page that explains what that gallery is before asking anyone
+to authenticate into it.
 
 It lives at the root of AUTH_HOST — by default the base domain itself, so the
 gallery is just `https://<PREVIEW_BASE_DOMAIN>/`. Signing in therefore lands you
@@ -23,7 +29,14 @@ import os
 
 from aiohttp import web
 
-from .config import AGENT_ENABLED, AGENT_HOST, AUTH_HOST, PREVIEW_BASE_DOMAIN
+from . import landing
+from .config import (
+    AGENT_ENABLED,
+    AGENT_HOST,
+    AUTH_HOST,
+    AUTO_STOP_MINUTES,
+    PREVIEW_BASE_DOMAIN,
+)
 from .pages import HOME_PAGE
 from .pwa import head_tags
 from .registry import registry
@@ -32,15 +45,22 @@ from .session import (
     can_use_agent,
     is_admin,
     is_authed,
-    redirect_to_login,
     request_email,
 )
 
 
 async def home_page(request: web.Request) -> web.Response:
-    """The gallery. Callers must have already established this is the login host."""
+    """The gallery, or the landing page. Callers have established this is the login host."""
     if not is_authed(request):
-        return redirect_to_login(request)
+        # The landing page, NOT a bounce to sign-in. Someone arriving here has no
+        # idea what this is yet, and the sign-in card is the wrong place to find
+        # out; `redirect_to_login` still handles anyone who followed a link to an
+        # actual preview, because there we know exactly where to send them back to.
+        return web.Response(
+            content_type="text/html",
+            text=landing.render(PREVIEW_BASE_DOMAIN),
+            headers={"Cache-Control": "no-store"},
+        )
     admin = is_admin(request)
     # Shown to whoever may actually use it — admins and the "agent" role — so a
     # granted member discovers it without being told the hostname.
@@ -50,6 +70,9 @@ async def home_page(request: web.Request) -> web.Response:
         .replace("__AGENT_URL__", json.dumps(agent_url))
         .replace("__IS_ADMIN__", "true" if admin else "false")
         .replace("__BASE__", json.dumps(PREVIEW_BASE_DOMAIN))
+        # The page infers awake/asleep from this window, so it has to be the same
+        # number the proxy actually pauses on rather than a hardcoded guess.
+        .replace("__IDLE_MIN__", json.dumps(AUTO_STOP_MINUTES))
         # json.dumps, not html.escape: this lands in an HTML text node, and dumps
         # gives us a quoted string whose contents can't close the surrounding tag.
         .replace("__EMAIL__", json.dumps(request_email(request) or "")[1:-1])
@@ -134,20 +157,59 @@ async def app_refresh(request: web.Request) -> web.Response:
     )
 
 
-async def app_forget(request: web.Request) -> web.Response:
-    """Drop one app from the gallery. Admin-only — the registry is shared state.
+async def _admin_body(request: web.Request) -> "dict | web.Response":
+    """Shared preamble for the admin-only gallery mutations.
 
-    Removes the record and its screenshot, never the sandbox itself. The app
-    re-registers on its own if anyone visits it again.
+    Returns the parsed body, or the Response to send instead. The three checks are
+    the same every time and getting one wrong is the whole security story, so they
+    live in one place: admin (404, never 403 — see auth.py), same-origin, JSON.
     """
     if not is_admin(request):
         return web.json_response({"message": "Not found"}, status=404)
     if request.headers.get("Origin", "") != f"https://{AUTH_HOST}":
         return web.json_response({"message": "Bad origin"}, status=403)
     try:
-        key = (await request.json()).get("key", "")
+        body = await request.json()
     except Exception:
         return web.json_response({"message": "Expected JSON"}, status=400)
+    return body if isinstance(body, dict) else {}
+
+
+async def app_label(request: web.Request) -> web.Response:
+    """Name one app by hand. Admin-only: the registry is shared, so is the name.
+
+    Sites arrive named after whatever `<title>` the agent happened to write, which
+    is often "Vite + React". A label is how a gallery of twenty stays legible.
+    """
+    body = await _admin_body(request)
+    if isinstance(body, web.Response):
+        return body
+    if not await registry.set_label(body.get("key", ""), str(body.get("label", ""))):
+        return web.json_response({"message": "Unknown app."}, status=404)
+    return web.json_response(_payload("Renamed."))
+
+
+async def app_pin(request: web.Request) -> web.Response:
+    """Pin or unpin one app, which is the only ordering a human controls."""
+    body = await _admin_body(request)
+    if isinstance(body, web.Response):
+        return body
+    pinned = bool(body.get("pinned"))
+    if not await registry.set_pinned(body.get("key", ""), pinned):
+        return web.json_response({"message": "Unknown app."}, status=404)
+    return web.json_response(_payload("Pinned." if pinned else "Unpinned."))
+
+
+async def app_forget(request: web.Request) -> web.Response:
+    """Drop one app from the gallery. Admin-only — the registry is shared state.
+
+    Removes the record and its screenshot, never the sandbox itself. The app
+    re-registers on its own if anyone visits it again.
+    """
+    body = await _admin_body(request)
+    if isinstance(body, web.Response):
+        return body
+    key = body.get("key", "")
 
     if not await registry.forget(key):
         return web.json_response({"message": "Unknown app."}, status=404)
