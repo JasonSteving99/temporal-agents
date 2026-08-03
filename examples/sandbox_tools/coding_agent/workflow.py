@@ -117,6 +117,63 @@ so every load shows the latest deploy, cache-first ONLY for immutable/versioned 
 `appinstalled` or when already `(display-mode: standalone)`. iOS fires no such event — there, show \
 a one-line "Share -> Add to Home Screen" hint instead."""
 
+# The gateway fronts TWO APIs — Gemini models over the Gemini API at its root, OpenAI models over an
+# OpenAI-style `/v1` endpoint — so the agent has to pair the right client library with whichever model
+# it picks. Which family a model belongs to is decided HERE, from its id, so that adding a model to
+# AI_GATEWAY_MODELS is a pure config change: the example code below is generated from the list rather
+# than typed out, exactly like the preview URL's domain and sandbox-id var. Hardcoding a model into
+# the prompt is the same mistake as the Daytona-era `/home/daytona` paths — it survives the config
+# change that invalidated it and quietly ships instructions that don't run.
+_OPENAI_MODEL_PREFIXES = ("gpt", "o1", "o3", "o4")
+
+
+def _is_openai_model(model: str) -> bool:
+    return model.lower().startswith(_OPENAI_MODEL_PREFIXES)
+
+
+_GATEWAY_MODELS = [m.strip() for m in AI_GATEWAY_MODELS.split(",") if m.strip()]
+_GATEWAY_DEFAULT = _GATEWAY_MODELS[0] if _GATEWAY_MODELS else ""
+_GATEWAY_OPENAI = next((m for m in _GATEWAY_MODELS if _is_openai_model(m)), "")
+_GATEWAY_GEMINI = next((m for m in _GATEWAY_MODELS if not _is_openai_model(m)), "")
+
+# One worked example per API the gateway actually serves. Each is emitted only if the model list
+# contains a model of that family, so a gateway serving just one of the two never shows the agent a
+# library it cannot use.
+_OPENAI_EXAMPLE = f"""
+
+For `{_GATEWAY_OPENAI}` (and any other `gpt-*` model) use the `openai` library \
+(`pip install openai`), pointed at the gateway's OpenAI-compatible endpoint:
+```python
+from openai import OpenAI
+
+client = OpenAI(api_key="unused", base_url="{AI_GATEWAY_URL}/v1")
+resp = client.responses.create(
+    model="{_GATEWAY_OPENAI}",
+    input="Summarise this in one sentence: ...",
+)
+print(resp.output_text)   # the reply, as a plain string
+```
+Async: `AsyncOpenAI` + `await client.responses.create(...)`, same arguments. For a system prompt, \
+pass `instructions="..."`.""" if _GATEWAY_OPENAI else ""
+
+_GEMINI_EXAMPLE = f"""
+
+For `{_GATEWAY_GEMINI}` (and any other `gemini-*` model) use the `google-genai` library \
+(`pip install google-genai`), pointed at the gateway's root:
+```python
+from google import genai
+
+client = genai.Client(api_key="unused", http_options={{"base_url": "{AI_GATEWAY_URL}"}})
+resp = client.models.generate_content(
+    model="{_GATEWAY_GEMINI}",
+    contents="Summarise this in one sentence: ...",
+)
+print(resp.text)          # the reply, as a plain string
+```
+Async: `await client.aio.models.generate_content(...)`, same arguments. For a system prompt: \
+`config=types.GenerateContentConfig(system_instruction="...")` with \
+`from google.genai import types`.""" if _GATEWAY_GEMINI else ""
+
 # Only offered when AI_GATEWAY_URL is configured. The gateway is reachable from inside the sandbox
 # only (it lives on the tailnet the sandbox joins), which is why the instruction is emphatic about
 # calling it SERVER-side: a previewed site's client-side fetch runs in the user's browser, which is
@@ -125,28 +182,18 @@ _AI_INSTRUCTION = f"""
 
 ## Building AI features
 
-This sandbox can reach a **pre-authenticated Gemini gateway** at {AI_GATEWAY_URL} — no API key \
+This sandbox can reach a **pre-authenticated AI gateway** at {AI_GATEWAY_URL} — no API key \
 exists or is needed; access is granted by the sandbox itself. Use it whenever the user asks for AI \
-features. Models available, best first: {AI_GATEWAY_MODELS}.
+features. Models available, best first: {AI_GATEWAY_MODELS}. Default to `{_GATEWAY_DEFAULT}` unless \
+the task gives you a reason to pick another.
 
-Use the `google-genai` library (`pip install google-genai`) pointed at the gateway. This is the \
-whole pattern — it runs as-is, so don't go looking for credentials or a different endpoint:
-```python
-from google import genai
+The gateway fronts two APIs, so match the library to the model you picked — the snippets below run \
+as-is, so don't go looking for credentials or a different endpoint.\
+{_OPENAI_EXAMPLE}\
+{_GEMINI_EXAMPLE}
 
-client = genai.Client(api_key="unused", http_options={{"base_url": "{AI_GATEWAY_URL}"}})
-resp = client.models.generate_content(
-    model="{AI_GATEWAY_MODELS.split(",")[0].strip()}",
-    contents="Summarise this in one sentence: ...",
-)
-print(resp.text)          # the reply, as a plain string
-```
-`api_key="unused"` is required: the library refuses to construct a client without one, and the \
-gateway ignores it. Never ask the user for a key and never put one in the code — there isn't one.
-
-In an async server: `await client.aio.models.generate_content(...)`, same arguments. For a system \
-prompt: `config=types.GenerateContentConfig(system_instruction="...")` with \
-`from google.genai import types`.
+`api_key="unused"` is required by both: the libraries refuse to construct a client without one, and \
+the gateway ignores it. Never ask the user for a key and never put one in the code — there isn't one.
 
 Call it from your **server-side code only** (the process `start.sh` starts). The gateway is reachable \
 from inside this sandbox, NOT from the user's browser, so a client-side `fetch()` to it from a \

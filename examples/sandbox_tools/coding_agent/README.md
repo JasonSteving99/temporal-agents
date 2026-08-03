@@ -222,21 +222,30 @@ Further caveats:
 
 Set `AI_GATEWAY_URL` (e.g. `http://llm`, a Tailscale Aperture node on your tailnet) and the agent is
 told it can build AI features against it. Authorization is the sandbox's **tailnet identity**, so no
-key exists or is needed — `google-genai` is pointed at the gateway with a placeholder `api_key` the
-library insists on and the gateway ignores:
+key exists or is needed — the client is pointed at the gateway with a placeholder `api_key` the
+library insists on and the gateway ignores.
+
+The gateway fronts **two APIs**, so the instruction pairs a library with each model: `gpt-*` models
+go through `openai` at `<gateway>/v1`, `gemini-*` models through `google-genai` at the gateway root.
 
 ```python
-from google import genai
+from openai import OpenAI
 
-client = genai.Client(api_key="unused", http_options={"base_url": "http://llm"})
-resp = client.models.generate_content(model="gemini-3.6-flash", contents="...")
-print(resp.text)
+client = OpenAI(api_key="unused", base_url="http://llm/v1")
+resp = client.responses.create(model="gpt-5.6-luna", input="...")
+print(resp.output_text)
 ```
 
-`api_key="unused"` is not decorative: the library refuses to construct a client without one, and the
-gateway ignores it. The instruction also gives the async form (`client.aio.models.generate_content`)
-and how to pass a system prompt, because those are the two things a model reaches for next and would
-otherwise debug against a gateway that gives no hints.
+`api_key="unused"` is not decorative: both libraries refuse to construct a client without one, and
+the gateway ignores it. The instruction also gives the async form and how to pass a system prompt for
+each library, because those are the two things a model reaches for next and would otherwise debug
+against a gateway that gives no hints.
+
+Neither snippet is typed into the prompt. `workflow.py` classifies each entry in `AI_GATEWAY_MODELS`
+by its id (`_is_openai_model`) and generates one worked example per family actually present — so a
+gateway serving only Gemini never shows the agent the `openai` library, and adding or reordering a
+model is a pure config change. This is the same rule the preview URL follows, and for the same
+reason: a model id hardcoded into the prompt outlives the config change that invalidated it.
 
 Two things the instruction is emphatic about, because both are easy to get wrong:
 
@@ -247,7 +256,8 @@ Two things the instruction is emphatic about, because both are easy to get wrong
   reach for an API key out of habit.
 
 Leave `AI_GATEWAY_URL` blank and the agent is never told the gateway exists. `AI_GATEWAY_MODELS`
-(default `gemini-3.6-flash, gemini-3.5-flash-lite`) is the list it picks from, best first.
+(default `gpt-5.6-luna, gemini-3.6-flash, gemini-3.5-flash-lite`) is the list it picks from, best
+first — the agent defaults to the first entry.
 
 ## Approvals
 
