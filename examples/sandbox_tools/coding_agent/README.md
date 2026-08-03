@@ -308,23 +308,34 @@ usual convention and it is deliberate — the thing that costs money is the thin
 
 #### Landing-page demo clips
 
-The landing page's two visuals are hand-built CSS by default: a dashboard that frosts over and thaws
-as its pill flips `live → suspended → resuming`, and a mock gallery grid. Both are **media slots** —
-drop a file into `preview/static/media/` and it is used instead, from the next page load, no restart:
+The landing page's three visuals are hand-built CSS by default. Each is also a **media slot** — drop
+a file into `preview/static/media/` and it is used instead, from the next page load, no restart:
 
-| File | Replaces | Good length |
-| --- | --- | --- |
-| `hero.webm` / `hero.mp4` | the wake sequence in the browser frame | 6–12s |
-| `gallery.webm` / `gallery.mp4` | the mock grid in the "every site" card | 4–8s |
+| Slot | Replaces | Capture as | Box |
+| --- | --- | --- | --- |
+| `hero.*` | the dashboard inside the browser frame | 6–12s clip | 2:1 |
+| `gallery.*` | the mock grid in the "every site" card | 4–8s clip | 16:10 |
+| `install.*` | the phone's screen in the "installs like an app" card | screenshot | 9:17 portrait |
 
-`.png` / `.jpg` / `.gif` work too. Videos are rendered muted, looping and `playsinline` with no
-controls, so record accordingly: **no cursor chrome, no audio, and a loop that starts and ends on
-the same frame.** For `hero`, the shot worth having is a real one of this system — open a suspended
-preview and let the page paint. Record at 16:9 or wider and at least 1280px; the frame is
-`object-fit: cover`, so anything taller is cropped from the bottom.
+`.webm`, `.mp4`, `.png`, `.jpg` and `.gif` all work; webm is offered to the browser first and mp4 is
+the fallback, so ship both when you ship video.
+
+**Two of the slots supply their own frame.** The hero draws the browser chrome and URL bar around
+its slot; the install card draws the phone bezel and notch around its own. So in both cases capture
+a **bare viewport** — a recording that includes browser or OS chrome ends up as chrome inside chrome.
+
+Everything is `object-fit: cover`, so the box crops rather than letterboxes. Two consequences worth
+planning for: anything taller than the box is cut from the bottom, and the `gallery` slot renders
+only ~500px wide, so a 1440px-wide capture is unreadable there — record it at roughly 1120px, or
+zoom to 133%, and check legibility at final size before you commit to a take.
+
+Videos autoplay muted, looping and `playsinline`, with no controls. Record accordingly: no audio
+track (`-an`), and **a loop whose last frame matches its first** — reset every control before you
+stop recording, or there is a visible jump every few seconds, forever.
 
 The CSS mocks are the default on purpose: they can never go out of date, they weigh nothing, and
-they hold still under `prefers-reduced-motion`. Adding clips is an upgrade, not a fix.
+they hold still under `prefers-reduced-motion`. Adding media is an upgrade, not a fix — and deleting
+a file puts the mock straight back.
 
 ### Cost: idle sandboxes stop themselves
 

@@ -15,11 +15,15 @@ model (proxy.py's idle pause), the hostname scheme (parse_preview_host), the
 403-to-everyone-but-us traffic token, the roles (allowlist.py). If one of those
 changes, the copy here is wrong and should change with it.
 
-MEDIA SLOTS. Two places render a real recording if one has been dropped into
-`preview/static/media/`, and a hand-built CSS mock otherwise (see pwa.media and
-the README section "Landing-page demo clips"). The mock is the default on
-purpose: it is always accurate, it costs no bytes, and nothing here degrades if
-the files are never added.
+MEDIA SLOTS. Three places — `hero`, `gallery`, `install` — render a real
+recording or screenshot if one has been dropped into `preview/static/media/`,
+and a hand-built CSS mock otherwise (see pwa.media_tag and the README section
+"Landing-page demo clips"). Two of them supply their own frame: the hero draws
+browser chrome around its slot and the install card draws a phone bezel around
+its own, so what you capture is a bare viewport in both cases.
+
+The mocks are the default on purpose: they are always accurate, they cost no
+bytes, and nothing here degrades if the files are never added.
 """
 
 import json
@@ -214,11 +218,42 @@ nav .host{font-family:var(--mono);font-size:12px;color:var(--faint)}
 }
 
 /* Gallery thumbnail mocks (the plain grid, and the one with meta rows). */
-.tiles{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:16px;width:100%}
-.tiles span{display:block;aspect-ratio:16/10;border-radius:6px;border:1px solid var(--line);
-            background:linear-gradient(160deg,#1B2230,#11141B)}
-.tiles span:nth-child(2){background:linear-gradient(160deg,#25201A,#14110C)}
-.tiles span:nth-child(5){background:linear-gradient(160deg,#16232A,#0D1519)}
+/* The phone. This card's claim is about a phone, so a grid of desktop-ish tiles
+   was the wrong picture — and the frame doubles as the media slot's bezel, the
+   same trick the hero plays with browser chrome: the frame is ours, the screen
+   is yours. A phone screenshot therefore needs no chrome of its own.
+   It is deliberately cropped by the box rather than shrunk to fit: a whole
+   phone at this width would be 90px wide and legible to nobody. */
+.vis.phone-vis{display:block;aspect-ratio:16/10;flex:0 0 auto;position:relative}
+.phone{position:absolute;left:50%;transform:translateX(-50%);top:26px;width:176px;
+       border-radius:26px;border:1px solid var(--line2);background:#1B212C;padding:5px;
+       box-shadow:0 18px 40px -14px rgba(0,0,0,.9)}
+.pscreen{border-radius:21px;overflow:hidden;background:var(--ground);position:relative;
+         aspect-ratio:9/17;display:flex;flex-direction:column}
+.pscreen video,.pscreen img{width:100%;height:100%;object-fit:cover;object-position:top center;
+                            display:block}
+/* The notch, and the reason the screen's own header starts below it. */
+.phone .notch{position:absolute;top:5px;left:50%;transform:translateX(-50%);z-index:2;
+              width:46px;height:13px;border-radius:0 0 8px 8px;background:#1B212C}
+.pbar{display:flex;align-items:center;padding:6px 11px 3px;font-family:var(--mono);
+      font-size:8px;color:var(--faint)}
+.pbar .sig{margin-left:auto;letter-spacing:1px}
+.phead{display:flex;align-items:center;gap:5px;padding:7px 11px 9px;
+       border-bottom:1px solid var(--line);font-family:var(--display);
+       font-weight:600;font-size:10px}
+.phead .glyph{width:13px;height:13px}
+.phead .av{margin-left:auto;width:14px;height:14px;border-radius:50%;
+           border:1px solid var(--line2);background:var(--raise)}
+.ptiles{padding:9px;display:flex;flex-direction:column;gap:8px}
+.ptile{border:1px solid var(--line);border-radius:7px;overflow:hidden;background:var(--panel)}
+.ptile .sh{display:block;aspect-ratio:16/10;position:relative;
+           background:linear-gradient(160deg,#25201A,#14110C)}
+.ptile:nth-child(2) .sh{background:linear-gradient(160deg,#16232A,#0D1519)}
+.ptile .sh .pill{position:absolute;left:5px;bottom:5px;font-size:7px;padding:1px 5px;gap:3px}
+.ptile .sh .pill::before{width:3px;height:3px}
+.ptile .nm{padding:5px 7px 6px;font-size:8px;font-weight:500}
+.ptile .hs{padding:0 7px 6px;font-family:var(--mono);font-size:7px;color:var(--faint);
+           overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .gtiles{display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:16px;width:100%}
 .gtiles .g{border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--panel)}
 .gtiles .g .sh{display:block;aspect-ratio:16/10;background:linear-gradient(160deg,#1B2230,#11141B)}
@@ -319,12 +354,34 @@ _GALLERY_MOCK = """
 """
 
 
+# What the phone shows with no screenshot dropped in: the gallery as it looks
+# installed — no browser chrome, because that is the claim being made.
+_INSTALL_MOCK = """
+<div class="pbar"><span>9:41</span><span class="sig">▮▮▮</span></div>
+<div class="phead">__MARK__Preview<span class="av"></span></div>
+<div class="ptiles">
+  <div class="ptile">
+    <span class="sh"><span class="pill live">awake</span></span>
+    <div class="nm">Signups</div>
+    <div class="hs">sbx-9f2a1c7d-3000</div>
+  </div>
+  <div class="ptile">
+    <span class="sh"><span class="pill frozen">asleep</span></span>
+    <div class="nm">Recipe box</div>
+    <div class="hs">sbx-4b1e77a2-3000</div>
+  </div>
+</div>
+"""
+
+
 def render(base_domain: str) -> str:
     """The landing page, with the base domain and any dropped-in media filled in."""
     base = base_domain or "preview.example.com"
     return (
         _TEMPLATE.replace("__HERO_MEDIA__", media_tag("hero", _HERO_MOCK))
         .replace("__GALLERY_MEDIA__", media_tag("gallery", _GALLERY_MOCK))
+        .replace("__INSTALL_MEDIA__",
+                 media_tag("install", _INSTALL_MOCK.replace("__MARK__", mark_svg())))
         .replace("__PWA_HEAD__", head_tags())
         # json.dumps then strip the quotes: this lands in HTML text nodes, and a
         # quoted JSON string cannot contain a character that closes the tag.
@@ -458,8 +515,9 @@ _TEMPLATE = (
       <p>Add it to your phone's home screen and the grid paints instantly. Tiles are
          screenshots, never live frames — browsing your gallery never wakes a
          sandbox or spends a cent.</p>
-      <div class="vis"><div class="tiles">
-        <span></span><span></span><span></span><span></span><span></span><span></span>
+      <div class="vis phone-vis"><div class="phone">
+        <span class="notch"></span>
+        <div class="pscreen">__INSTALL_MEDIA__</div>
       </div></div>
     </div>
 
