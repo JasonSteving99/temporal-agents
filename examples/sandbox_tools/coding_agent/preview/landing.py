@@ -182,6 +182,10 @@ nav .host{font-family:var(--mono);font-size:12px;color:var(--faint)}
 .get p{color:var(--muted);font-size:14.5px}
 .get .vis{margin-top:20px;border-radius:10px;border:1px solid var(--line);background:var(--sunk);
           overflow:hidden;flex:1;min-height:150px;display:flex;align-items:center;justify-content:center}
+/* A dropped-in clip needs a box to fill; the CSS mocks size themselves and must
+   NOT get one, hence :has() rather than a blanket rule on .vis. */
+.get .vis:has(video),.get .vis:has(img){display:block;aspect-ratio:16/10;flex:0 0 auto}
+.get .vis video,.get .vis img{width:100%;height:100%;object-fit:cover;display:block}
 .get.wide{grid-column:1/-1}
 
 /* Anatomy of a preview hostname — the second signature. */

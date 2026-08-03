@@ -112,6 +112,12 @@ self.addEventListener("fetch", (e) => {
   // Never let the worker sit in the middle of sign-in.
   if (url.pathname.startsWith("/__auth/")) return;
 
+  // Nor in the middle of a video. A <video> fetches by byte range, and a cache
+  // that answers a range request with a whole 200 breaks playback in Safari.
+  // These live on the signed-out landing page anyway, which is not the surface
+  // this worker exists to make fast.
+  if (url.pathname.startsWith("/__apps/media/")) return;
+
   // Screenshots are immutable per ?v=<shot_at>, so this is free freshness.
   if (url.pathname.startsWith("/__apps/shot/")) {
     e.respondWith(cacheFirst(req));
@@ -206,23 +212,31 @@ def media_tag(slot: str, fallback: str) -> str:
     autoplay on iOS at all — and carry no controls, because the slot is an
     illustration, not something to operate.
     """
-    found = [
-        (ext, mime) for ext, mime in MEDIA_TYPES.items()
-        if os.path.isfile(os.path.join(MEDIA_DIR, slot + ext))
-    ]
+    found = []
+    for ext, mime in MEDIA_TYPES.items():
+        path = os.path.join(MEDIA_DIR, slot + ext)
+        try:
+            # The mtime rides in the URL as ?v=, exactly like the gallery's
+            # screenshots. Without it, re-cutting a clip is invisible for a day to
+            # anyone who has already loaded the page — which is the whole
+            # iteration loop, so it would be found the hard way.
+            found.append((ext, mime, int(os.path.getmtime(path))))
+        except OSError:
+            continue
     if not found:
         return fallback
-    videos = [(e, m) for e, m in found if m.startswith("video/")]
+    videos = [f for f in found if f[1].startswith("video/")]
     if videos:
         sources = "".join(
-            f'<source src="/__apps/media/{slot}{ext}" type="{mime}">' for ext, mime in videos
+            f'<source src="/__apps/media/{slot}{ext}?v={ver}" type="{mime}">'
+            for ext, mime, ver in videos
         )
         return (
             '<video autoplay muted loop playsinline preload="metadata" '
             f'aria-hidden="true">{sources}</video>'
         )
-    ext = found[0][0]
-    return f'<img src="/__apps/media/{slot}{ext}" alt="">'
+    ext, _, ver = found[0]
+    return f'<img src="/__apps/media/{slot}{ext}?v={ver}" alt="">'
 
 
 async def media_asset(request: web.Request) -> web.Response:
