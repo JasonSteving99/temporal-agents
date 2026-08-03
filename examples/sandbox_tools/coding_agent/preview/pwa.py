@@ -52,7 +52,9 @@ ICONS = {
     "favicon.svg": "image/svg+xml",
 }
 
-THEME_COLOR = "#0b0d10"
+# Matches --ground in theme.py: the browser paints this behind the app before
+# any CSS lands, so a mismatch shows as a flash of the old colour on launch.
+THEME_COLOR = "#080A0E"
 
 SERVICE_WORKER = """// Preview gallery service worker. See preview/pwa.py for the rationale.
 const CACHE = "gallery-__BUILD__";
@@ -154,7 +156,7 @@ async def manifest(request: web.Request) -> web.Response:
         {
             "name": "Preview gallery",
             "short_name": "Previews",
-            "description": "Sites built by the coding agent.",
+            "description": "Every site your coding agent has built, on its own hostname.",
             # Scope and start_url are the ROOT even though this file is served from
             # /__apps/ — the installed app should open the gallery, not this path.
             "start_url": "/",

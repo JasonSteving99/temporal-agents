@@ -52,9 +52,13 @@ THE MAP — modules bottom-up, each importing only the ones above it:
                    is_admin predicates every request is checked against.
     screenshots.py Headless-browser capture, taken only while a sandbox is
                    already awake — the reason the gallery is images, not iframes.
-    theme.py       The design system: tokens, type, buttons, state pills. Every
-                   page below draws on it, so colour and control changes are made
-                   once. Read its docstring for what the palette MEANS.
+    theme.py       The design system: tokens, type, buttons, state pills, and
+                   the mark. Every page below draws on it, so colour and control
+                   changes are made once. Read its docstring for what the palette
+                   MEANS.
+    icons.py       Not imported by anything — a script that rasterises theme's
+                   mark into the PWA's icon set, so what you install looks like
+                   what you installed it from. Re-run it after changing the mark.
     pwa.py         Manifest, service worker, icons and the optional landing-page
                    clips — what makes the gallery an installable, always-fresh
                    mobile app.

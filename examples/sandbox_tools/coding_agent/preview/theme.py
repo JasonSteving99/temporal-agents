@@ -152,6 +152,85 @@ select.field{
 """
 
 
+# --------------------------------------------------------------------------
+# The mark
+# --------------------------------------------------------------------------
+# A browser window whose content is a prompt: the amber chevron the agent types
+# into, the cold line it draws. Both state colours appear in it, which is the
+# point — the mark is the palette's legend.
+#
+# It is defined ONCE here and used two ways: inline at 22px in every page header,
+# and rendered to the PWA's icons by `icons.py`. They used to be unrelated
+# artwork, so the thing you install looked nothing like the thing you installed
+# it from.
+MARK_VIEWBOX = 24
+
+
+def mark_paths(frame: str = "#2C3548", weight: float = 1.0) -> str:
+    """The mark's geometry on a 24x24 grid, without the wrapping <svg>.
+
+    `frame` and `weight` exist because an app icon is not a 22px UI glyph: a
+    hairline that reads perfectly in a header disappears entirely on a phone's
+    home screen, so `icons.py` asks for a brighter, heavier frame.
+    """
+    ink = weight + 0.6
+    return (
+        f'<rect x="1.5" y="4.5" width="21" height="15" rx="3.5" '
+        f'stroke="{frame}" stroke-width="{weight}"/>'
+        f'<path d="M1.5 9h21" stroke="{frame}" stroke-width="{weight}"/>'
+        '<circle cx="5" cy="6.75" r="1" fill="#FFC24B"/>'
+        f'<path d="M7 15.5l2.5-2.5L7 10.5" stroke="#FFC24B" stroke-width="{ink}" '
+        'stroke-linecap="round" stroke-linejoin="round"/>'
+        f'<path d="M12 15.5h5" stroke="#7FD8F5" stroke-width="{ink}" stroke-linecap="round"/>'
+    )
+
+
+def mark_svg(cls: str = "glyph") -> str:
+    """The inline header mark. Hairline weights, transparent behind."""
+    return (
+        f'<svg class="{cls}" viewBox="0 0 {MARK_VIEWBOX} {MARK_VIEWBOX}" fill="none" '
+        f'aria-hidden="true">{mark_paths()}</svg>'
+    )
+
+
+def icon_svg(shape: str = "rounded") -> str:
+    """The mark as a standalone app icon, on a 100x100 grid.
+
+    Three shapes, because the three places an icon lands mask it differently:
+
+      rounded  — what a browser and most launchers show as-is, so we round it
+                 ourselves and leave the corners transparent.
+      square   — apple-touch-icon: iOS applies its own mask and a pre-rounded
+                 source shows as a rounded square inside a rounded square.
+      maskable — Android crops to whatever shape the launcher likes, so this one
+                 bleeds to the edges and keeps the artwork inside the safe zone
+                 (the middle 80%), which is why it is drawn smaller.
+    """
+    radius = 22 if shape == "rounded" else 0
+    span = 52 if shape == "maskable" else 68     # of 100
+    scale = span / MARK_VIEWBOX
+    offset = (100 - span) / 2
+    return (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none">'
+        '<defs><linearGradient id="p" x1="0" y1="0" x2="0" y2="1">'
+        '<stop offset="0" stop-color="#171C26"/><stop offset="1" stop-color="#0A0D12"/>'
+        "</linearGradient></defs>"
+        f'<rect width="100" height="100" rx="{radius}" fill="url(#p)"/>'
+        # A rim only earns its place on the rounded variant, where the icon keeps
+        # its own edge. On the two that get masked it would survive as a stray
+        # hairline wherever the launcher's crop happens to fall.
+        + (
+            '<rect x=".5" y=".5" width="99" height="99" rx="21.5" stroke="#232B3A"/>'
+            if radius
+            else ""
+        )
+        +
+        f'<g transform="translate({offset},{offset}) scale({scale:.4f})">'
+        f"{mark_paths(frame='#46536B', weight=1.3)}</g>"
+        "</svg>"
+    )
+
+
 def head(title: str, extra_css: str = "", pwa: str = "") -> str:
     """The `<head>` every page in this package shares.
 

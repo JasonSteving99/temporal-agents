@@ -13,7 +13,7 @@ either would try to interpret. Values are injected as `json.dumps(...)`, which i
 valid JS literal syntax and quotes anything dangerous.
 """
 
-from .theme import head
+from .theme import head, mark_svg
 
 # ---------------------------------------------------------------------------
 # Sign-in
@@ -70,23 +70,12 @@ _GOOGLE_G = (
     "</svg>"
 )
 
-_MARK_GLYPH = (
-    '<svg class="glyph" viewBox="0 0 24 24" fill="none" aria-hidden="true">'
-    '<rect x="1.5" y="4.5" width="21" height="15" rx="3.5" stroke="#2C3548"/>'
-    '<path d="M1.5 9h21" stroke="#2C3548"/>'
-    '<circle cx="5" cy="6.75" r="1" fill="#FFC24B"/>'
-    '<path d="M7 15.5l2.5-2.5L7 10.5" stroke="#FFC24B" stroke-width="1.6" '
-    'stroke-linecap="round" stroke-linejoin="round"/>'
-    '<path d="M12 15.5h5" stroke="#7FD8F5" stroke-width="1.6" stroke-linecap="round"/>'
-    "</svg>"
-)
-
 LOGIN_PAGE = (
     '<!doctype html><html lang="en"><head>'
     + head("Sign in — Preview", _LOGIN_CSS, "__PWA_HEAD__")
     + """</head><body>
 <div class="top"><a class="mark" href="/">"""
-    + _MARK_GLYPH
+    + mark_svg()
     + """Preview</a></div>
 <main><div class="card">
   <span class="eyebrow">Sandboxed live previews</span>
@@ -346,7 +335,7 @@ HOME_PAGE = (
   <div class="wrap">
     <div class="bar">
       <a class="mark" href="/">"""
-    + _MARK_GLYPH
+    + mark_svg()
     + """Preview</a>
       <span id="agent-slot"></span>
       <div class="acct">
@@ -801,7 +790,7 @@ ADMIN_PAGE = (
     + """</head><body><div class="wrap">
   <div class="top">
     <a class="mark" href="/">"""
-    + _MARK_GLYPH
+    + mark_svg()
     + """Preview</a>
     <a class="btn sm" href="/">Back to gallery</a>
   </div>

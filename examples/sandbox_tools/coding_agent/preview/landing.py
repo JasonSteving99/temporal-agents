@@ -25,7 +25,7 @@ the files are never added.
 import json
 
 from .pwa import head_tags, media_tag
-from .theme import head
+from .theme import head, mark_svg
 
 # --------------------------------------------------------------------------
 # Page-specific CSS. The shared layer (tokens, buttons, pills) is in theme.py.
@@ -257,18 +257,6 @@ footer .mono{margin-left:auto}
 @media (max-width:620px){ footer .mono{margin-left:0} }
 """
 
-# Reused twice (nav + close), so it is built once here.
-_GLYPH = (
-    '<svg class="glyph" viewBox="0 0 24 24" fill="none" aria-hidden="true">'
-    '<rect x="1.5" y="4.5" width="21" height="15" rx="3.5" stroke="#2C3548"/>'
-    '<path d="M1.5 9h21" stroke="#2C3548"/>'
-    '<circle cx="5" cy="6.75" r="1" fill="#FFC24B"/>'
-    '<path d="M7 15.5l2.5-2.5L7 10.5" stroke="#FFC24B" stroke-width="1.6" '
-    'stroke-linecap="round" stroke-linejoin="round"/>'
-    '<path d="M12 15.5h5" stroke="#7FD8F5" stroke-width="1.6" stroke-linecap="round"/>'
-    "</svg>"
-)
-
 
 # --------------------------------------------------------------------------
 # The two visuals, each with a real-recording slot and a hand-built fallback.
@@ -347,7 +335,7 @@ _TEMPLATE = (
 
 <nav><div class="wrap">
   <span class="mark">"""
-    + _GLYPH
+    + mark_svg()
     + """Preview</span>
   <span class="host mono">__BASE__</span>
   <a class="btn go sm" href="/__auth/login">Sign in</a>
