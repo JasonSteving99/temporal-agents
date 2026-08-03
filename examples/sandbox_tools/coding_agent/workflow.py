@@ -21,7 +21,7 @@ with workflow.unsafe.imports_passed_through():
     from openai.types.shared import Reasoning
 
     from temporal_agent_harness.ai_sdks.openai_agents_harness import as_openai_agent_tool
-    from temporal_agent_harness.harness import AgentWorkflowRunner, agent
+    from temporal_agent_harness.harness import AgentWorkflowRunner, agent, slash_commands
     from temporal_agent_harness.harness.agent_protocol import (
         AgentConfig,
         TextMessage,
@@ -43,10 +43,12 @@ with workflow.unsafe.imports_passed_through():
 
 
 TASK_QUEUE = "sandboxed-coding-agent"
-# Terra, not Luna: this agent's turns are long multi-step tool work (scaffold, install, build, fix),
-# which is the tier Terra is for. Luna is the cheap/fast tier — swap this one line if you'd rather
-# trade capability for cost, since `self._model` is the only thing that reads it.
-DEFAULT_MODEL = "gpt-5.6-terra"
+
+# Cheap/fast by default; `/model gpt-5.6-terra` swaps up mid-session when a task earns it. Terra is
+# the tier for long multi-step tool work, but most turns here don't need it and it costs ~10x.
+# Order matters: the first entry is the default, and the UI offers these as the `/model` choices.
+SUPPORTED_MODELS = ("gpt-5.6-luna", "gpt-5.6-terra")
+DEFAULT_MODEL = SUPPORTED_MODELS[0]
 
 # `summary="auto"` is what makes the reasoning stream visible: the harness's OpenAI observer turns
 # `response.reasoning_summary_text.delta` events into `thought_summary` turn events, and without a
@@ -243,6 +245,16 @@ class SandboxedCodingAgentWorkflow:
             # (read/grep/glob) + the plan tools, mirroring the callback agent's UX in the Svelte UI.
             approval_policy_default=ToolApprovalPolicy.allow_inherently_safe(),
             sandbox=SANDBOX,
+            # Passing `slash_commands` REPLACES the default set, so re-list the packaged four
+            # (/approvals, /allow-tools, /status, /stop) alongside ours or they disappear from the UI.
+            slash_commands=[
+                *slash_commands.default_commands(),
+                slash_commands.model_selector(
+                    choices=SUPPORTED_MODELS,
+                    set_model=self._set_model,
+                    description="Set the model for this coding session.",
+                ),
+            ],
         )
         self._model: str = DEFAULT_MODEL
         self._todos: list = []
@@ -252,6 +264,11 @@ class SandboxedCodingAgentWorkflow:
         # (it is durable workflow state, restored on replay, with no dependency on the provider
         # still holding the prior interaction).
         self._conversation: list[TResponseInputItem] = []
+
+    def _set_model(self, model: str) -> None:
+        """`/model` handler. Takes effect on the NEXT turn: `ask` builds a fresh `agents.Agent` per
+        turn, so the switch never lands mid-run, and the transcript carries over unchanged."""
+        self._model = model
 
     @workflow.run
     async def run(self, _config: AgentConfig) -> None:
