@@ -269,6 +269,15 @@ header{position:sticky;top:0;z-index:30;background:rgba(8,10,14,.86);
             border:1px solid var(--live-deep);border-radius:6px;padding:2px 6px}
 .host{font-family:var(--mono);font-size:11.5px;color:var(--faint);margin-top:5px;
       overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* The "kept" tag rides at the FRONT of the hostname line — the one place that
+   survives both densities without touching either layout, and the one place a
+   long hostname's ellipsis can't eat it.
+   Deliberately OUTSIDE the state palette (theme.py): amber/blue/grey mean
+   running/suspended/gone, and kept is not a state a sandbox is in — it is who
+   owns it. Colouring it would make the one honest signal on this page ambiguous. */
+.tag{display:inline-block;margin-right:7px;padding:1px 6px;border-radius:4px;
+     border:1px solid var(--line2);background:var(--raise);color:var(--muted);
+     font-size:10px;font-weight:500;letter-spacing:.1em;text-transform:uppercase}
 .when{font-size:12px;color:var(--faint);margin-top:8px}
 .acts{display:flex;gap:7px;padding:0 15px 15px}
 .acts .btn{flex:0 0 auto}
@@ -394,6 +403,12 @@ HOME_PAGE = (
     sandbox to serve someone. <strong>Refresh</strong> forces a new one and wakes the
     sandbox if it is asleep. Sleep state is inferred from the last visit, so a
     sandbox the agent is working in may say asleep while it is not.
+    <br><br>
+    Every site here belongs to the chat session that built it, and disappears when that
+    session ends. <strong>Keep</strong> forks its sandbox into a copy that no session
+    owns — tagged <span class="tag">kept</span> — which stays reachable at its own new
+    hostname long after the agent is gone. A kept sandbox is suspended, not running, but
+    it bills storage until you delete it, and deleting it is the only way it ever goes.
   </p>
 </div>
 <div class="stale" id="stale">offline — showing the last loaded list</div>
@@ -470,7 +485,12 @@ const hostOf = (a) => a.key + "." + BASE;
 // Awake is INFERRED, never observed: the proxy pauses a sandbox after IDLE_MIN
 // with no traffic, so a recent visit means it is almost certainly still up. The
 // note under the grid says so, and the tooltip below repeats it where it matters.
-const awake = (a) => a.last_seen && (Date.now() / 1000 - a.last_seen) < IDLE_MIN * 60;
+// The one thing we DO know is a pause we performed ourselves (asleep_since), and
+// it outranks the guess — without that, a just-kept app would claim to be awake
+// for a full window, having been parked the second it was made.
+const awake = (a) =>
+  a.last_seen && (Date.now() / 1000 - a.last_seen) < IDLE_MIN * 60
+  && !((a.asleep_since || 0) > a.last_seen);
 
 function ago(ts) {
   if (!ts) return "never";
@@ -492,6 +512,10 @@ const I_REFRESH = '<path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4.5V11h-6.2"
 const I_RENAME = '<path d="M4 20h16"/><path d="M14.5 4.5l4.2 4.2L9 18.4l-4.6 1 1-4.6z"/>';
 const I_FORGET = '<path d="M4 7h16"/><path d="M9.5 7V4.8h5V7"/><path d="M6.5 7l1 12.5h9L17.5 7"/>';
 const I_STAR = '<path d="M12 3.6l2.6 5.4 5.9.8-4.3 4.1 1 5.9-5.2-2.8-5.2 2.8 1-5.9L3.5 9.8l5.9-.8z"/>';
+// A bookmark, not a save-disk or a copy glyph: keeping is "set this one aside",
+// and the two obvious alternatives already mean writing a file and duplicating a
+// row somewhere else in most people's heads.
+const I_KEEP = '<path d="M6.5 3.8h11v16.4L12 16.3l-5.5 3.9z"/>';
 
 // --- one card --------------------------------------------------------------
 function card(app) {
@@ -537,6 +561,13 @@ function card(app) {
   t.textContent = name(app);          // textContent: titles come from agent-built pages
   const h = document.createElement("div");
   h.className = "host"; h.textContent = hostOf(app);
+  if (app.kept) {
+    const tag = document.createElement("span");
+    tag.className = "tag"; tag.textContent = "kept";
+    tag.title = "A fork with no chat session attached — it outlives the agent that built it"
+      + (app.forked_from ? ", copied from " + app.forked_from : "") + ".";
+    h.prepend(tag);
+  }
   const w = document.createElement("div");
   w.className = "when";
   w.textContent = "visited " + ago(app.last_seen) + " · shot " + ago(app.shot_at);
@@ -555,10 +586,19 @@ function card(app) {
 
   if (IS_ADMIN) {
     acts.appendChild(iconBtn(I_RENAME, "Rename", "", () => rename(app, t)));
-    acts.appendChild(iconBtn(I_FORGET, "Remove from gallery", "danger", (btn) => {
-      if (confirm("Remove " + hostOf(app) + " from the gallery? The sandbox is left alone."))
-        post("/__apps/forget", { key: app.key }, btn);
-    }));
+    if (!app.kept) acts.appendChild(iconBtn(I_KEEP, "Keep this site", "", (btn) => keep(app, btn)));
+    // For a kept app, removing the record and deleting the sandbox are the same
+    // act: this record holds the only copy of its id, so a record-only removal
+    // strands a sandbox that no one can reach and no session will ever stop.
+    acts.appendChild(iconBtn(I_FORGET, app.kept ? "Delete permanently" : "Remove from gallery",
+      "danger", (btn) => {
+        const ok = app.kept
+          ? confirm("Delete " + hostOf(app) + " for good?\\n\\n"
+              + "Its sandbox is destroyed along with the site inside it. Nothing else has a "
+              + "copy, and this cannot be undone.")
+          : confirm("Remove " + hostOf(app) + " from the gallery? The sandbox is left alone.");
+        if (ok) post("/__apps/forget", { key: app.key, kill: !!app.kept }, btn);
+      }));
   }
   el.appendChild(acts);
   return el;
@@ -582,6 +622,25 @@ function iconBtn(path, label, cls, onclick) {
   b.appendChild(icon(path));
   b.onclick = () => onclick(b);
   return b;
+}
+
+// Keep = fork the sandbox, so the site stops depending on the chat session that
+// built it (server side: keep.py). The confirm is long because all three of its
+// sentences are things you cannot find out afterwards: what it copies, what it
+// does to the original, and that it bills until you delete it.
+function keep(app, btn) {
+  if (!confirm(
+    "Keep " + hostOf(app) + "?\\n\\n"
+    + "This copies the whole sandbox — running server and all — into a new one that no chat "
+    + "session owns, so the site stays up after the agent is gone.\\n\\n"
+    + "The original is paused for a moment while it is snapshotted, which a turn in progress "
+    + "may notice. The copy is suspended immediately and then bills storage until you delete it."
+  )) return;
+  const p = post("/__apps/keep", { key: app.key }, btn);
+  // After post(), not before: it clears the message itself, and it does so
+  // synchronously — everything up to its first await has already run by here.
+  msg.textContent = "Keeping " + hostOf(app) + "… snapshotting the sandbox, this takes a moment.";
+  return p;
 }
 
 // Rename in place. Enter commits, Escape abandons, blur commits — the three

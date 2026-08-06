@@ -63,6 +63,7 @@ def build_app() -> web.Application:
     app.router.add_post("/__apps/refresh", home.app_refresh)
     app.router.add_post("/__apps/label", home.app_label)
     app.router.add_post("/__apps/pin", home.app_pin)
+    app.router.add_post("/__apps/keep", home.app_keep)
     app.router.add_post("/__apps/forget", home.app_forget)
 
     # Catch-all: Host decides the sandbox, the path is forwarded verbatim.

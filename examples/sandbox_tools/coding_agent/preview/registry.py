@@ -20,6 +20,15 @@ opposite way round:
 Lazy flushing means a hard kill can lose up to FLUSH_INTERVAL of `last_seen`
 drift. That is the only field at risk, and it's cosmetic — registrations,
 removals and screenshot updates are all flushed immediately.
+
+ONE RECORD IS NOT LIKE THE OTHERS. A `kept` app (see keep.py) is a fork whose
+sandbox no chat session owns, so this file is the ONLY place its id is written
+down — a chat transcript won't have it, because no agent ever saw it. Two rules
+follow, and both are enforced below rather than left to callers:
+
+  * kept records are never evicted to make room (`touch`), and
+  * `forget`ting one is the only way to lose it, which is why the UI makes that
+    the same gesture as destroying the sandbox.
 """
 
 import asyncio
@@ -118,29 +127,99 @@ class Registry:
         now = int(time.time())
         app = self._apps.get(key)
         if app is None:
-            if len(self._apps) >= MAX_APPS:
-                # Make room by dropping the least recently seen. Unbounded growth
-                # would eventually make the gallery useless anyway.
-                oldest = min(self._apps, key=lambda k: self._apps[k].get("last_seen", 0))
-                self._apps.pop(oldest, None)
-            self._apps[key] = {
-                "key": key,
-                "sandbox_id": sandbox_id,
-                "port": port,
-                "title": "",      # read off the page itself when we screenshot it
-                "label": "",      # what a human called it; wins over title in the UI
-                "pinned": False,
-                "first_seen": now,
-                "last_seen": now,
-                "shot_at": 0,
-            }
+            self._evict_one()
+            self._apps[key] = self._record(sandbox_id, port, now)
             self._dirty = True
             self.flush(force=True)      # a new app is worth an immediate write
             return True
         app["last_seen"] = now
+        # We just served it, so it is demonstrably awake — whatever a pause we
+        # recorded earlier says (see mark_sandbox_paused).
+        app["asleep_since"] = 0
         self._dirty = True
         self.flush()                    # debounced
         return False
+
+    @staticmethod
+    def _record(sandbox_id: str, port: int, now: int) -> dict:
+        return {
+            "key": app_key(sandbox_id, port),
+            "sandbox_id": sandbox_id,
+            "port": port,
+            "title": "",          # read off the page itself when we screenshot it
+            "label": "",          # what a human called it; wins over title in the UI
+            "pinned": False,
+            "first_seen": now,
+            "last_seen": now,
+            "shot_at": 0,
+            # When WE paused this sandbox, so the gallery can state its sleep
+            # rather than infer it from the clock. 0 means "we never did", which
+            # is every record written before this field existed.
+            "asleep_since": 0,
+            # Set only by keep.py. `kept` makes the record unevictable; the other
+            # two are provenance for the card ("kept from <key>, on <date>").
+            "kept": False,
+            "kept_at": 0,
+            "forked_from": "",
+        }
+
+    def _evict_one(self) -> None:
+        """Drop the least recently seen app once we're at MAX_APPS.
+
+        KEPT apps are excluded from the candidates, not merely sorted last. They
+        are the only records whose loss is unrecoverable — a kept sandbox's id
+        exists nowhere else — so an unrelated burst of new previews must never be
+        able to age one out. If every record is kept there is nothing to evict and
+        the map grows past the cap; that is the right failure, and it is bounded
+        by how many sandboxes an admin chose to keep by hand.
+        """
+        if len(self._apps) < MAX_APPS:
+            return
+        candidates = [k for k, v in self._apps.items() if not v.get("kept")]
+        if not candidates:
+            return
+        self._apps.pop(min(candidates, key=lambda k: self._apps[k].get("last_seen", 0)), None)
+
+    async def register_kept(self, sandbox_id: str, port: int, source: dict) -> dict:
+        """Record a forked sandbox as a kept app, and return the new record.
+
+        The name carries over from the source, because "Keep" means keep THIS
+        site: arriving as an untitled copy would make a gallery of forks
+        unreadable, and the screenshot that follows would only re-title it with
+        the same `<title>` the original already has.
+        """
+        async with self._lock:
+            now = int(time.time())
+            app = self._record(sandbox_id, port, now)
+            app.update(
+                title=source.get("title", ""),
+                label=source.get("label", ""),
+                kept=True,
+                kept_at=now,
+                forked_from=source.get("key", ""),
+            )
+            self._apps[app["key"]] = app
+            self._dirty = True
+            self.flush(force=True)
+            return app
+
+    async def mark_sandbox_paused(self, sandbox_id: str) -> None:
+        """Record that we paused this sandbox — for every port it serves.
+
+        The gallery otherwise infers sleep from "no traffic for AUTO_STOP_MINUTES",
+        which is right eventually but wrong for the minutes right after a pause we
+        performed ourselves. Keeping the pause here makes those cards honest
+        immediately, and it matters most for a just-kept app: keep.py parks the
+        fork the moment it is made, so without this a brand-new kept card would
+        claim to be awake for a full window.
+        """
+        async with self._lock:
+            now = int(time.time())
+            for app in self._apps.values():
+                if app.get("sandbox_id") == sandbox_id:
+                    app["asleep_since"] = now
+            self._dirty = True
+            self.flush(force=True)
 
     async def record_shot(self, key: str, title: str) -> None:
         async with self._lock:

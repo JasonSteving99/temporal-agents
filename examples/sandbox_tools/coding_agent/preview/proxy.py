@@ -208,7 +208,7 @@ async def _pause_when_idle(sandbox_id: str) -> None:
                 # deadline as the baseline rather than pausing on no evidence.
                 last_seen = end_at
                 continue
-            await AsyncSandbox.pause(sandbox_id=sandbox_id, api_key=E2B_API_KEY)
+            await park(sandbox_id)
             return
     except asyncio.CancelledError:
         raise
@@ -218,6 +218,33 @@ async def _pause_when_idle(sandbox_id: str) -> None:
         logger.info("idle pause of %s did not apply — %s: %s", sandbox_id, type(e).__name__, e)
     finally:
         _idle_pausers.pop(sandbox_id, None)
+
+
+async def park(sandbox_id: str) -> None:
+    """Suspend a sandbox and remember that we did.
+
+    The pause itself is one SDK call; the reason this is a function is the second
+    line. Sleep is otherwise INFERRED by the gallery from "no traffic for a
+    while", which lags a pause we performed ourselves by a whole idle window —
+    and for a just-kept fork (keep.py parks it immediately) that inference would
+    be wrong for the entire life of the card's first ten minutes.
+
+    Raises whatever the SDK raises: both callers care whether it worked, and one
+    of them reports it to a user who is watching.
+    """
+    await AsyncSandbox.pause(sandbox_id=sandbox_id, api_key=E2B_API_KEY)
+    await registry.mark_sandbox_paused(sandbox_id)
+
+
+def cancel_idle_timer(sandbox_id: str) -> None:
+    """Drop one sandbox's pending idle-pause, e.g. because it was just parked.
+
+    Never call this from inside `_pause_when_idle` — cancelling the running task
+    from within itself raises CancelledError at its next await.
+    """
+    task = _idle_pausers.pop(sandbox_id, None)
+    if task:
+        task.cancel()
 
 
 def cancel_idle_timers() -> None:

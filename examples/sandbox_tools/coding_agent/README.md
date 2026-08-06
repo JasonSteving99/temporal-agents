@@ -292,10 +292,12 @@ it needs a wildcard DNS record + a reverse proxy for wildcard TLS; see
   of visitor: someone handed a preview link who had no idea what they were being given, and someone
   not on the allowlist who had no way to know that being *added* was the missing step.
 - **Signed in** you get the gallery ([`pages.py`](preview/pages.py)), with client-side search, sort,
-  grouping by sandbox and a compact density — none of which costs a request. The three controls that
+  grouping by sandbox and a compact density — none of which costs a request. The controls that
   change shared state are admin-only, because one registry is shared by everyone who signs in:
   **rename** (`POST /__apps/label`, since sites arrive named whatever `<title>` the agent wrote),
-  **pin** (`POST /__apps/pin`, the only ordering a human controls), and **forget**.
+  **pin** (`POST /__apps/pin`, the only ordering a human controls), **forget**, and **keep**
+  (`POST /__apps/keep` — see [Keeping a site](#keeping-a-site-past-the-chat-session), the only one
+  that creates a sandbox rather than editing a JSON file).
 
 Card state is **inferred, not observed**: a site visited within `PREVIEW_AUTO_STOP_MINUTES` is
 labelled `awake`, anything older `asleep`. That is right almost always and wrong in one case worth
@@ -337,6 +339,48 @@ The CSS mocks are the default on purpose: they can never go out of date, they we
 they hold still under `prefers-reduced-motion`. Adding media is an upgrade, not a fix — and deleting
 a file puts the mock straight back.
 
+### Keeping a site past the chat session
+
+Every preview belongs to the chat session that built it: the harness deletes the sandbox when the
+workflow ends, so closing the session takes the site with it — and the sandbox id with that, since
+the id only ever appeared in the transcript. **Keep** (the bookmark button on a gallery card,
+admin-only) breaks that ownership, entirely from the preview site: no agent, no worker and no
+Temporal involvement, just [`keep.py`](preview/keep.py) and the E2B API between a button and a
+sandbox nothing will reclaim.
+
+It is `AsyncSandbox.fork`: E2B checkpoints the running sandbox — **memory included** — and boots a
+second one from that snapshot. The copy has a new id that no workflow knows, and the agent's server
+is already running inside it, so there is no `start.sh` to re-run and no build to wait for. It lands
+in the gallery tagged `kept`, at its own `<newSandboxId>-<port>` hostname, and every existing thing
+(the auth gate, wake-on-request, the idle pause, screenshots) works on it unchanged.
+
+Three details do the actual work of persisting, and each is a place this could have quietly failed:
+
+- **The copy is parked immediately.** A fork boots *running*, on a `timeout` after which E2B **kills**
+  it rather than pausing it. The proxy's idle timer would park it within `PREVIEW_AUTO_STOP_MINUTES`,
+  but if the proxy dies in between, nothing survives to do it and the kept sandbox is destroyed by
+  that timeout — the exact loss the feature exists to prevent. So the pause happens inside the
+  request, and the copy is at rest from the second it exists.
+- **Kept records are never evicted** from the registry (`PREVIEW_MAX_APPS`). No agent ever saw this
+  sandbox, so `apps.json` is the only record that it exists; aging one out would strand a live
+  sandbox nobody can reach or stop. Mount the `preview-apps` volume (compose does) or that record —
+  and with it the sandbox — is lost on container replacement.
+- **Deleting is part of the feature.** A kept sandbox is owned by nobody, so nothing will ever
+  reclaim it, and a parked one bills storage until someone does. On a kept card the trash button
+  therefore destroys the sandbox as well as the record, and says so.
+
+Two things a fork inherits that surprise people. It carries the source's **tailnet identity**, which
+two sandboxes can't both hold — whichever re-registers wins, and the loser's watchdog (see
+[Tailnet](#tailnet)) notices `Self.Online` go false and registers as a new node within about a
+minute, so a kept copy may not reach the AI gateway for its first minute alive. And it carries the
+source's **env**, `TAILSCALE_AUTHKEY` included: a kept sandbox is exactly as privileged as the
+agent-built box it came from, so keeping one is not a way to make it safe to hand out.
+
+The cost to the *source* is that the checkpoint briefly pauses it. E2B resumes it itself and leaves
+its id and expiration untouched — so this doesn't disturb the idle timer's `end_at` heartbeat below
+— but a tool call in flight can still feel it, which is why the confirm dialog says so rather than
+letting the chat stall for no visible reason.
+
 ### Cost: idle sandboxes stop themselves
 
 Resuming a sandbox on a preview hit would otherwise leave it billing compute forever. E2B has no
@@ -360,8 +404,10 @@ activity (`bash` allows 3 minutes).
 
 ### Caveats (this is a demo, not production)
 
-- **Lifetime is tied to the chat session.** The harness pauses the sandbox between turns and deletes
-  it when the workflow ends, so once you close the session the preview 404s. On E2B that pause is a
+- **Lifetime is tied to the chat session** unless you keep it. The harness pauses the sandbox between
+  turns and deletes it when the workflow ends, so once you close the session the preview 404s —
+  [Keep](#keeping-a-site-past-the-chat-session) forks it into a sandbox the workflow doesn't own,
+  which is the one way out of this. On E2B that pause is a
   SUSPEND — memory and processes are frozen and come back on resume, so the agent's server does not
   need relaunching. It is also invisible to remote-box unless remote-box did it, which is why the
   preview proxy's own idle pause has to check first that nobody is using the box (above).

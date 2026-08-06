@@ -70,10 +70,14 @@ THE MAP — modules bottom-up, each importing only the ones above it:
                    page when not — and the routes that organise the gallery.
     proxy.py       The actual proxying: wake the sandbox, wait for its server,
                    forward the request. Plus the Caddy cert-issuance check.
+    keep.py        Forking a sandbox so a site outlives the chat session that
+                   built it — the one thing here that creates a sandbox rather
+                   than merely reaching one, and the one that deletes one.
     app.py         Route table + lifecycle. The order routes are added in is
                    load-bearing — read the comments there.
 
 Start at `allowlist.py` if you care about the security model, `proxy.py` if you
 care about how a request reaches a sandbox, `screenshots.py` if you care about
-what the gallery costs to run.
+what the gallery costs to run, `keep.py` if you care about what happens when the
+agent goes away.
 """

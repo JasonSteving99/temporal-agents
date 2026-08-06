@@ -7,6 +7,8 @@ The root of the login host, and the routes that back it.
     POST /__apps/refresh                     re-screenshot one app
     POST /__apps/label                       rename one app          (admin)
     POST /__apps/pin                         pin/unpin one app       (admin)
+    POST /__apps/keep                        fork it, so it outlives (admin)
+                                             the chat session (keep.py)
     POST /__apps/forget                      drop one app            (admin)
 
 Signed in, "/" is a gallery of every preview site the proxy has ever served.
@@ -200,16 +202,71 @@ async def app_pin(request: web.Request) -> web.Response:
     return web.json_response(_payload("Pinned." if pinned else "Unpinned."))
 
 
+async def app_keep(request: web.Request) -> web.Response:
+    """Fork one app's sandbox so the site survives the chat session (keep.py).
+
+    Admin-only, and the strictest of the admin controls in spirit: every other
+    one edits a JSON file, this one creates a sandbox that nothing will ever
+    reclaim on its own. It also briefly pauses the source, which a chat in
+    progress can feel — the gallery says both in the confirm dialog.
+
+    Slow by nature (a checkpoint, a boot, a screenshot), so the button spends the
+    whole time disabled rather than this growing a job queue: keeping is a
+    deliberate, one-at-a-time act, and the user is watching the result.
+    """
+    body = await _admin_body(request)
+    if isinstance(body, web.Response):
+        return body
+
+    app = registry.get(body.get("key", ""))
+    if app is None:
+        return web.json_response({"message": "Unknown app."}, status=404)
+    if app.get("kept"):
+        # Forking a fork would work, but it is never what someone means by a
+        # second click, and the copy would be indistinguishable in the gallery.
+        return web.json_response(
+            {"message": "That one is already kept.", "apps": registry.list()}, status=409
+        )
+
+    # Local, like the ensure_ready import above and for the same reason: proxy.py
+    # serves this module's gallery, and keep.py imports proxy.py.
+    from .keep import KeepError, keep
+
+    try:
+        kept, parked = await keep(app, request.app["session"])
+    except KeepError as exc:
+        return web.json_response(
+            {"message": f"Could not keep that site: {exc}", "apps": registry.list()},
+            status=502,
+        )
+
+    host = f"{kept['key']}.{PREVIEW_BASE_DOMAIN}"
+    if not parked:
+        # The copy exists but is still running, so it is on E2B's kill timer
+        # until something pauses it. Opening it starts the idle timer that will.
+        return web.json_response(_payload(
+            f"Kept as {host}, but it could not be suspended — open it once to put it to sleep."
+        ))
+    return web.json_response(_payload(f"Kept as {host}. It no longer needs the chat session."))
+
+
 async def app_forget(request: web.Request) -> web.Response:
     """Drop one app from the gallery. Admin-only — the registry is shared state.
 
-    Removes the record and its screenshot, never the sandbox itself. The app
-    re-registers on its own if anyone visits it again.
+    Removes the record and its screenshot. It leaves the SANDBOX alone unless
+    `kill` is set, and the gallery only sets that for a kept one — where the two
+    really are the same act: this record is the only place that sandbox's id is
+    written down, so forgetting it without killing it would strand a sandbox
+    nobody can reach and nobody can bill-stop. Every other app belongs to a chat
+    session that will clean up after itself, and re-registers on its own if
+    anyone visits it again.
     """
     body = await _admin_body(request)
     if isinstance(body, web.Response):
         return body
     key = body.get("key", "")
+    app = registry.get(key)
+    kill = bool(body.get("kill"))
 
     if not await registry.forget(key):
         return web.json_response({"message": "Unknown app."}, status=404)
@@ -217,4 +274,18 @@ async def app_forget(request: web.Request) -> web.Response:
         os.remove(shot_path(key))
     except OSError:
         pass   # no screenshot to clean up
-    return web.json_response(_payload("Removed."))
+
+    if not (kill and app):
+        return web.json_response(_payload("Removed."))
+
+    from .keep import destroy
+
+    try:
+        await destroy(app["sandbox_id"])
+    except Exception as exc:
+        # The record is already gone, so say plainly that the sandbox is not —
+        # this is the one path that can leak one, and the id is the only way back.
+        return web.json_response(_payload(
+            f"Removed from the gallery, but {app['sandbox_id']} could not be deleted: {exc}"
+        ))
+    return web.json_response(_payload("Deleted."))
